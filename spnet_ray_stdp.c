@@ -42,6 +42,9 @@
 #define RAYMATH_IMPLEMENTATION
 #include <raymath.h>
 
+#define STB_DS_IMPLEMENTATION
+#include "stb_ds.h"
+
 /* Window */
 #define WIDTH 1050
 #define HEIGHT 700
@@ -70,12 +73,49 @@ static float *cell_activity;
 
 #define GRID_COLS 40
 #define GRID_ROWS 25
-#define CELLS (GRID_COLS*GRID_ROWS)
+#define CELLS (GRID_COLS*GRID_ROWS) // this number needs to be == N == NE+NI
 
 #define GRID_W (WIDTH - 2*MARGIN)
 #define GRID_H (HEIGHT - 2*MARGIN)
 const float CELL_W = ((float)GRID_W / (float)GRID_COLS);
 const float CELL_H = ((float)GRID_H / (float)GRID_ROWS);
+
+/* Delay queues: for each delay (1..MAX_DELAY) maintain list of targets arriving after that many ms */
+typedef struct
+{
+    int *neuron;   /* target neuron ids */
+    float *weight; /* corresponding weights */
+    int count;
+    int cap;
+} DelayBucket;
+
+/* Outgoing connections structure */
+typedef struct
+{
+    int *targets;            /* CE or CI targets */
+    float *weights;          /* corresponding weights */
+    unsigned char *delay;    /* delays in ms (for excitatory) */
+} OutConn;
+
+#define VUBUF_MS 2000
+typedef struct
+{
+	double a;
+	double b;
+	double c;
+	double d;
+
+	double v;
+	double u;
+
+	/* per-neuron last spike time for STDP (ms), initialize to very negative */
+	int last_spike_time;
+	/* per-neuron v history buffer for selected trace (circular) */
+	float v_hist[VUBUF_MS]; /* v_hist[neuron][idx] */
+	/* per-neuron u history buffer for selected trace (circular) */
+	float u_hist[VUBUF_MS]; /* u_hist[neuron][idx] */
+	OutConn outconn;                        /* size N */
+} IzkNeuron;
 
 typedef struct
 {
@@ -117,14 +157,14 @@ int pick_random_cells_in_annulus(int rc, int cc, int rmin, int rmax, int k, Cell
         }
     }
     if (cnt == 0) {
-        free(candidates);
+        free(candidates); candidates = NULL;
         return 0;
     }
 
     // Se k >= cnt prendiamo tutti
     if (k >= cnt) {
         for (int i = 0; i < cnt; i++) out[i] = candidates[i];
-        free(candidates);
+        free(candidates); candidates = NULL;
         return cnt;
     }
 
@@ -138,29 +178,12 @@ int pick_random_cells_in_annulus(int rc, int cc, int rmin, int rmax, int k, Cell
         out[i] = candidates[i];
     }
 
-    free(candidates);
+    free(candidates); candidates = NULL;
     return k;
 }
 
 /* Raster storage */
 #define FIRING_BUF 2000000 /* pair (time, neuron) capacity */
-
-/* Delay queues: for each delay (1..MAX_DELAY) maintain list of targets arriving after that many ms */
-typedef struct
-{
-    int *neuron;   /* target neuron ids */
-    float *weight; /* corresponding weights */
-    int count;
-    int cap;
-} DelayBucket;
-
-/* Outgoing connections structure */
-typedef struct
-{
-    int *targets;            /* CE or CI targets */
-    float *weights;          /* corresponding weights */
-    unsigned char *delay;    /* delays in ms (for excitatory) */
-} OutConn;
 
 /* STDP parameters (pair-based) */
 #define A_plus 0.1f
@@ -171,24 +194,16 @@ typedef struct
 #define W_MAX 10.0f
 
 /* Globals */
-static float *v;
-static float *u;
-static OutConn *outconn;                        /* size N */
+static IzkNeuron *neurons;
 static DelayBucket delaybuckets[MAX_DELAY+1];   /* index 1..MAX_DELAY used; 0 unused */
 static int current_delay_index = 0;             /* rotates every ms */
 static int *firing_times;                         /* circular buffer of pairs (time, neuron) */
 static int firing_count = 0;
 static int firing_cap = FIRING_BUF;
 
-/* per-neuron last spike time for STDP (ms), initialize to very negative */
-static int *last_spike_time;
-
-/* per-neuron v history buffer for selected trace (circular) */
-#define VUBUF_MS 2000
-static float (*v_hist)[VUBUF_MS]; /* v_hist[neuron][idx] */
+/* per-neuron v history index for selected trace (circular) */
 static int vhist_idx = 0;
-/* per-neuron u history buffer for selected trace (circular) */
-static float (*u_hist)[VUBUF_MS]; /* u_hist[neuron][idx] */
+/* per-neuron u history index for selected trace (circular) */
 static int uhist_idx = 0;
 
 /* Selected neuron */
@@ -263,50 +278,45 @@ static void bucket_clear(DelayBucket *db)
 /* Initialize network (connections, weights, delays, v/u, buffers) */
 static void init_network(void)
 {
+	arrsetlen(neurons, N);
     /* allocate */
-    v = (float*)malloc(N * sizeof(float));
-    u = (float*)malloc(N * sizeof(float));
-    outconn = (OutConn*)malloc(N * sizeof(OutConn));
     firing_times = (int*)malloc(firing_cap * 2 * sizeof(int));
-    last_spike_time = (int*)malloc(N * sizeof(int));
-    v_hist = (float(*)[VUBUF_MS])malloc(N * VUBUF_MS * sizeof(float));
-    u_hist = (float(*)[VUBUF_MS])malloc(N * VUBUF_MS * sizeof(float));
 
     cell_activity = (float*)calloc(CELLS, sizeof(float));
 
     /* init neurons */
     for (int i = 0; i < N;i++) {
         float r = frandf()*frandf();
-        v[i] = -65.0f + 15.0f * r;
+        neurons[i].v = -65.0f + 15.0f * r;
         if (i < NE)
-            u[i] = 0.2f * v[i];
+        	neurons[i].u = 0.2f * neurons[i].v;
         else
-            u[i] = 0.2f * v[i];
-        last_spike_time[i] = -1000000;
+        	neurons[i].u = 0.2f * neurons[i].v;
+        neurons[i].last_spike_time = -1000000;
         for (int k = 0; k < VUBUF_MS; k++) {
-        	v_hist[i][k] = v[i];
-        	u_hist[i][k] = u[i];
+        	neurons[i].v_hist[k] = neurons[i].v;
+        	neurons[i].u_hist[k] = neurons[i].u;
         }
     }
 
     /* init connections */
     for (int i = 0; i < N;i++) {
         int K = (i < NE) ? CE : CI;
-        outconn[i].targets = (int*)malloc(K * sizeof(int));
-        outconn[i].weights = (float*)malloc(K * sizeof(float));
-        outconn[i].delay = (unsigned char*)malloc(K * sizeof(unsigned char));
+        neurons[i].outconn.targets = (int*)malloc(K * sizeof(int));
+        neurons[i].outconn.weights = (float*)malloc(K * sizeof(float));
+        neurons[i].outconn.delay = (unsigned char*)malloc(K * sizeof(unsigned char));
         for (int j = 0; j < K; j++) {
             int t = rand() % N;
-            outconn[i].targets[j] = t;
+            neurons[i].outconn.targets[j] = t;
             if (i < NE) {
                 /* excitatory initial weight random around 6.0 +- */
-                outconn[i].weights[j] = 6.0f * frandf();
+            	neurons[i].outconn.weights[j] = 6.0f * frandf();
                 /* excitatory delay 1..MAX_DELAY */
-                outconn[i].delay[j] = (unsigned char)(1 + (rand() % MAX_DELAY));
+            	neurons[i].outconn.delay[j] = (unsigned char)(1 + (rand() % MAX_DELAY));
             } else {
                 /* inhibitory negative weight */
-                outconn[i].weights[j] = -5.0f * frandf();
-                outconn[i].delay[j] = 1; /* inhibitory delay 1 ms */
+            	neurons[i].outconn.weights[j] = -5.0f * frandf();
+            	neurons[i].outconn.delay[j] = 1; /* inhibitory delay 1 ms */
             }
         }
     }
@@ -321,20 +331,15 @@ static void init_network(void)
 /* Free network memory */
 static void free_network(void)
 {
-    if (!v)
+    if (!neurons)
         return;
     for (int i = 0; i < N; i++) {
-        free(outconn[i].targets);
-        free(outconn[i].weights);
-        free(outconn[i].delay);
+        free(neurons[i].outconn.targets);
+        free(neurons[i].outconn.weights);
+        free(neurons[i].outconn.delay);
     }
-    free(outconn);
-    free(v);
-    free(u);
+    arrfree(neurons);
     free(firing_times);
-    free(last_spike_time);
-    free(v_hist);
-    free(u_hist);
     for (int d = 0; d <= MAX_DELAY; d++) {
         free(delaybuckets[d].neuron);
         free(delaybuckets[d].weight);
@@ -368,22 +373,23 @@ static void apply_stdp_on_pre(int pre, int t_pre)
     int K = CE; /* only excitatory neurons have CE */
     if (pre >= NE) /* only excitatory synapses are plastic */
         return;
-    for (int j = 0; j < K; j++) {
-        int post = outconn[pre].targets[j];
-        int t_post = last_spike_time[post];
+    for (int i = 0; i < K; i++) {
+        int post = neurons[pre].outconn.targets[i];
+        int t_post = neurons[post].last_spike_time;
         if (t_post <= -100000)
             continue;
         int dt = t_pre - t_post; /* positive if pre after post => depression */
         if (dt > 0 && dt < 1000) {
             /* pre after post -> LTD (A_minus), dt positive */
             float dw = -A_minus * expf(- (float)dt / TAU_MINUS);
-            outconn[pre].weights[j] += dw;
+            neurons[pre].outconn.weights[i] += dw;
         } else {
             /* pre before post => potentiation handled when post spikes, to keep symmetry we handle both sides:
                We'll also handle LTP when pre precedes post by applying when post spikes (below). */
         }
         /* clamp */
-        outconn[pre].weights[j] = clampf(outconn[pre].weights[j], W_MIN, W_MAX);
+        neurons[pre].outconn.weights[i] =
+        		clampf(neurons[pre].outconn.weights[i], W_MIN, W_MAX);
     }
 }
 
@@ -397,17 +403,17 @@ static void apply_stdp_on_post(int post, int t_post)
     for (int pre = 0; pre < NE; pre++) {
         int K = CE;
         for (int j = 0; j < K; j++) {
-            if (outconn[pre].targets[j] != post)
+            if (neurons[pre].outconn.targets[j] != post)
                 continue;
-            int t_pre = last_spike_time[pre];
+            int t_pre = neurons[pre].last_spike_time;
             if (t_pre <= -100000)
                 continue;
             int dt = t_post - t_pre; /* positive if post after pre => potentiation */
             if (dt > 0 && dt < 1000) {
                 float dw = A_plus * expf(- (float)dt / TAU_PLUS);
-                outconn[pre].weights[j] += dw;
+                neurons[pre].outconn.weights[j] += dw;
                 /* clamp */
-                outconn[pre].weights[j] = clampf(outconn[pre].weights[j], W_MIN, W_MAX);
+                neurons[pre].outconn.weights[j] = clampf(neurons[pre].outconn.weights[j], W_MIN, W_MAX);
             }
         }
     }
@@ -416,9 +422,9 @@ static void apply_stdp_on_post(int post, int t_post)
 /* Schedule a delivered event: place target in delay bucket for appropriate arrival time */
 static void schedule_spike_delivery(int pre, int conn_index)
 {
-    int post = outconn[pre].targets[conn_index];
-    float w = outconn[pre].weights[conn_index];
-    int delay = outconn[pre].delay[conn_index];
+    int post = neurons[pre].outconn.targets[conn_index];
+    float w = neurons[pre].outconn.weights[conn_index];
+    int delay = neurons[pre].outconn.delay[conn_index];
     if (delay < 1)
         delay = 1;
     if (delay > MAX_DELAY)
@@ -460,15 +466,15 @@ static void sim_step(void)
 //        float c = (i < NE) ? -65.0f : -65.0f;
 //        float d = (i < NE) ? 8.0f : 2.0f;
     	for (int step = 0; step < num_steps; ++step) {
-            float dv = 0.04f * v[i] * v[i] + 5.0f * v[i] + 140.0f - u[i] + I[i];
-            v[i] += dv * (DT / (float)num_steps);
+            float dv = 0.04f * neurons[i].v * neurons[i].v + 5.0f * neurons[i].v + 140.0f - neurons[i].u + I[i];
+            neurons[i].v += dv * (DT / (float)num_steps);
 		}
-        u[i] += a * (b * v[i] - u[i]) * (DT / (float)num_steps);
+    	neurons[i].u += a * (b * neurons[i].v - neurons[i].u) * (DT / (float)num_steps);
     }
 
     /* 4) Check for spikes (v >= 30) */
     for (int i = 0; i < N; i++) {
-        if (v[i] >= 30.0f) {
+        if (neurons[i].v >= 30.0f) {
             /* record spike */
             add_firing_record(t_ms, i);
             /* STDP: apply pre-spike rule (depression for pre after recent post) */
@@ -476,8 +482,8 @@ static void sim_step(void)
             /* reset */
             float d = (i < NE) ? 8.0f : 2.0f;
             float c = (i < NE) ? -65.0f : -65.0f;
-            v[i] = c;
-            u[i] += d;
+            neurons[i].v = c;
+            neurons[i].u += d;
             /* schedule deliveries to targets according to their delays */
             int K = (i < NE) ? CE : CI;
             for (int j = 0; j < K; j++) {
@@ -486,7 +492,7 @@ static void sim_step(void)
             /* STDP: handle post-spike LTP for incoming excitatory synapses */
             apply_stdp_on_post(i, t_ms);
             /* update last spike time */
-            last_spike_time[i] = t_ms;
+            neurons[i].last_spike_time = t_ms;
         }
     }
 
@@ -496,8 +502,8 @@ static void sim_step(void)
     vhist_idx = (vhist_idx + 1) % VUBUF_MS;
     uhist_idx = (uhist_idx + 1) % VUBUF_MS;
     for (int i = 0; i < N; i++) {
-    	v_hist[i][vhist_idx] = v[i];
-    	u_hist[i][uhist_idx] = u[i];
+    	neurons[i].v_hist[vhist_idx] = neurons[i].v;
+    	neurons[i].u_hist[uhist_idx] = neurons[i].u;
     }
 }
 
@@ -508,7 +514,7 @@ static float mean_exc_weight(void)
     long cnt = 0;
     for (int i = 0; i < NE; i++) {
         for (int j = 0; j < CE; j++) {
-            s += outconn[i].weights[j];
+            s += neurons[i].outconn.weights[j];
             cnt++;
         }
     }
@@ -536,23 +542,27 @@ static int neuron_from_raster_click(int click_x, int click_y, int rx, int ry, in
     return nid;
 }
 
-Vector2 xy_from_cellpos(CellPos cp)
+/* helper: convert index -> row,col and viceversa */
+static inline CellPos index_to_cellpos(int idx, int *r, int *c) {
+    *r = idx / GRID_COLS;
+    *c = idx % GRID_COLS;
+	return (CellPos){ *r, *c };
+}
+static inline int cellpos_to_index(int r, int c) {
+    if (r < 0)
+    	r = (r % GRID_ROWS + GRID_ROWS) % GRID_ROWS;
+    if (c < 0)
+    	c = (c % GRID_COLS + GRID_COLS) % GRID_COLS;
+    return r * GRID_COLS + c;
+}
+/* helper: convert row,col -> x,y (cell's top left+MARGIN) */
+static inline Vector2 cellpos_to_vec2(CellPos cp)
 {
 	Vector2 ret = {0};
     ret.x = MARGIN + cp.c * CELL_W;
     ret.y = MARGIN + cp.r * CELL_H;
     return ret;
 }
-
-static CellPos cellpos_from_neuron_idx(int neuron_idx)
-{
-	CellPos ret = {
-			.r = neuron_idx / GRID_COLS,
-			.c = neuron_idx % GRID_COLS
-	};
-	return ret;
-}
-
 
 /* Find neuron by clicking raster: map x,y to time and neuron id */
 static int neuron_from_grid_click(int click_x, int click_y, int rx, int ry, int rw, int rh)
@@ -603,8 +613,8 @@ static void draw_selected_trace(int sx, int sy, int sw, int sh)
         while (pos < 0)
             pos += VUBUF_MS;
         pos %= VUBUF_MS;
-        vv = v_hist[selected_neuron][pos];
-        uu = u_hist[selected_neuron][pos];
+        vv = neurons[selected_neuron].v_hist[pos];
+        uu = neurons[selected_neuron].u_hist[pos];
         /* map vv (-100..40) to y */
         float vnorm = (vv + 100.0f) / 140.0f;
         float unorm = (uu + 100.0f) / 140.0f;
@@ -646,7 +656,7 @@ void compute_cell_activity(void)
 //            metric += fabsf(syn[i].g_gabaa);
 //        if (disp_gabab)
 //            metric += 0.5f * fabsf(syn[i].g_gabab);
-        float vdep = v[i] + 65.0f;
+        float vdep = neurons[i].v + 65.0f;
         if (vdep > 0.0f)
             metric += 0.02f * vdep;
         cell_activity[cell] += metric;
@@ -859,9 +869,10 @@ int main(void)
 
                     // evidenzia celle disponibili nell'anello (trasparente)
                     for (int ni = 0; ni < N; ++ni) {
-                    	CellPos cp = cellpos_from_neuron_idx(ni);
+                    	CellPos cp = {0};
+                    	cp = index_to_cellpos(ni, &cp.r, &cp.c);
                         if (in_annulus(cp.r, cp.c, center_r, center_c, rmin, rmax)) {
-                        	Vector2 xy = xy_from_cellpos(cp);
+                        	Vector2 xy = cellpos_to_vec2(cp);
                             DrawRectangle(xy.x+1, xy.y+1, CELL_W - 1, CELL_H - 1, (Color){200, 230, 255, 80});
                         }
 					}
@@ -871,14 +882,14 @@ int main(void)
                     	CellPos cp = {0};
                     	cp.r = selected[i].r;
                     	cp.c = selected[i].c;
-                    	Vector2 xy = xy_from_cellpos(cp);
+                    	Vector2 xy = cellpos_to_vec2(cp);
                         DrawRectangle(xy.x+2, xy.y+2, CELL_W-4, CELL_H-4, (Color){ 253, 249, 0, 80 });
                     }
 
                     // testo di stato
                     DrawText(TextFormat("Center: (%d,%d)  rmin=%d  rmax=%d  selected=%d", center_r, center_c, rmin, rmax, selected_count),
                              10, GRID_H - 20, 10, GRAY);
-                    DrawText("Space: new pick  Click: set center  Up/Down: rmin  R: inc rmax", 10, GRID_H - 36, 10, GRAY);
+                    DrawText("Space: new pick  Click: set center  Up/Down: rmin  RIGHT/LEFT: rmax", 10, GRID_H - 36, 10, GRAY);
 
                     if (selected_neuron >= 0) {
                         /* selected neuron trace */
@@ -950,7 +961,7 @@ int main(void)
                         step = 1;
                     int idx = 0;
                     for (int i = 0; i < N && idx < M; i += step, idx++) {
-                        float vv = v[i];
+                        float vv = neurons[i].v;
                         float norm = (vv + 100.0f) / 140.0f;
                         if (norm < 0)
                             norm = 0;
