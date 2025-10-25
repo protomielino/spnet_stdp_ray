@@ -42,6 +42,233 @@
 #define RAYMATH_IMPLEMENTATION
 #include <raymath.h>
 
+#define STB_DS_IMPLEMENTATION
+#include "stb_ds.h"
+
+#define CYAN  CLITERAL(Color){ 0, 255, 255, 255 }
+
+/* Tipi estesi: ogni entry ha anche uno "spread" (raggio d'influenza 0..1) */
+typedef enum
+{
+    STOCK_EMPTY,
+    STOCK_GREYSCALE,
+    STOCK_COLDHOT,
+    STOCK_SPECTRUM,
+} Stock;
+
+typedef struct
+{
+    double first;   // posizione 0..1
+    Color  second;  // colore
+    double spread;  // semilarghezza d'influenza (0..1)
+} ColourEntry;
+
+ColourEntry *palette = NULL;
+
+typedef enum { WEIGHT_LINEAR, WEIGHT_QUADRATIC, WEIGHT_GAUSSIAN, WEIGHT_COSINE } WeightMode;
+
+/* Imposta modalità globale (default) */
+static WeightMode g_weight_mode = WEIGHT_LINEAR;
+
+/* Se gaussian, regola la "sigma" relativa */
+static double g_weight_gaussian_sigma = 0.35;
+
+/* Peso: linear falloff (esistente)
+   w = 1 - (dist / spread)  for dist <= spread, else 0 */
+static double weight_linear(double dist, double spread)
+{
+    if (spread <= 0.0 || dist > spread)
+        return 0.0;
+    return 1.0 - (dist / spread);
+}
+
+/* Peso: quadratic falloff (più morbido)
+   w = (1 - (dist/spread))^2 */
+static double weight_quadratic(double dist, double spread)
+{
+    if (spread <= 0.0 || dist > spread)
+        return 0.0;
+    double x = 1.0 - (dist / spread);
+    return x * x;
+}
+
+/* Peso: gaussian
+   w = exp(-0.5 * (dist / (sigma*spread))^2)
+   sigma controls larghezza relativa; usare sigma ~0.3..0.6
+   Normalizziamo a 1 in dist=0. */
+static double weight_gaussian(double dist, double spread, double sigma)
+{
+    if (spread <= 0.0)
+        return 0.0;
+    /* convertiamo spread in sigma-equivalente: spread è il raggio utile (cutoff),
+       scegliamo sigma tale che w(dist=spread) ~ small (es. ~0.01) */
+    double s = fmax(sigma, 1e-6);
+    double x = dist / (spread * s);
+    if (dist > spread)
+        return 0.0;
+    return exp(-0.5 * x * x);
+}
+
+/* Peso: cosine smoothstep (very smooth, compact support)
+   w = 0.5 * (1 + cos(pi * dist / spread)) for dist <= spread, else 0 */
+static double weight_cosine(double dist, double spread)
+{
+    if (spread <= 0.0 || dist > spread)
+        return 0.0;
+    double x = dist / spread;
+    return 0.5 * (1.0 + cos(M_PI * x)); /* cos from 0..pi */
+}
+
+/* Funzioni API */
+void Palette_init(ColourEntry **palette, Stock stock);
+Color Palette_Sample(ColourEntry **palette, double t);
+void Palette_SetColour(ColourEntry **palette, double d, Color col, double spread);
+void Palette_SetColourSimple(ColourEntry **palette, double d, Color col);
+/* Setter opzionali */
+void Palette_SetWeightMode(WeightMode m) { g_weight_mode = m; }
+void Palette_SetGaussianSigma(double s) { g_weight_gaussian_sigma = s; }
+
+/* Implementazioni */
+
+void Palette_init(ColourEntry **palette, Stock stock)
+{
+    arrfree(*palette);
+    switch (stock)
+    {
+    case STOCK_EMPTY:
+        break;
+    case STOCK_GREYSCALE:
+        arrput(*palette, ((ColourEntry){0.0, BLACK, 1.0}));
+        arrput(*palette, ((ColourEntry){1.0, WHITE, 1.0}));
+        break;
+    case STOCK_COLDHOT:
+        arrput(*palette, ((ColourEntry){0.0/3.0, BLACK, 1.0/3.0}));
+        arrput(*palette, ((ColourEntry){1.0/3.0, CYAN, 1.0/3.0}));
+        arrput(*palette, ((ColourEntry){2.0/3.0, RED, 1.0/3.0}));
+        arrput(*palette, ((ColourEntry){3.0/3.0, YELLOW, 1.0/3.0}));
+        break;
+    case STOCK_SPECTRUM:
+        arrput(*palette, ((ColourEntry){0.0 / 6.0, BLACK, 1.0 / 6.0}));
+        arrput(*palette, ((ColourEntry){1.0 / 6.0, RED, 1.0 / 6.0}));
+        arrput(*palette, ((ColourEntry){2.0 / 6.0, YELLOW, 1.0 / 6.0}));
+        arrput(*palette, ((ColourEntry){3.0 / 6.0, GREEN, 1.0 / 6.0}));
+        arrput(*palette, ((ColourEntry){4.0 / 6.0, CYAN, 1.0 / 6.0}));
+        arrput(*palette, ((ColourEntry){5.0 / 6.0, BLUE, 1.0 / 6.0}));
+        arrput(*palette, ((ColourEntry){6.0 / 6.0, MAGENTA, 1.0 / 6.0}));
+        break;
+    }
+    /* Assicuriamoci ordinamento crescente per posizione */
+    for (size_t i = 0; i + 1 < arrlen(*palette); i++) {
+        for (size_t j = i + 1; j < arrlen(*palette); j++) {
+            if ((*palette)[i].first > (*palette)[j].first) {
+                ColourEntry tmp = (*palette)[i];
+                (*palette)[i] = (*palette)[j];
+                (*palette)[j] = tmp;
+            }
+        }
+    }
+}
+
+/* Helper che imposta colore con spread di default 0.0 (compatibilità) */
+void Palette_SetColourSimple(ColourEntry **palette, double d, Color col)
+{
+    Palette_SetColour(palette, d, col, 0.0);
+}
+
+void Palette_SetColour(ColourEntry **palette, double d, Color col, double spread)
+{
+    d = fmin(fmax(d, 0.0), 1.0);
+    if (spread < 0.0)
+        spread = 0.0;
+    if (spread > 1.0)
+        spread = 1.0;
+
+    /* Se esiste entry esatta alla stessa posizione, sovrascrivi */
+    for (size_t i = 0; i < arrlen(*palette); i++) {
+        if ((*palette)[i].first == d) {
+            (*palette)[i].second = col;
+            (*palette)[i].spread = spread;
+            return;
+        }
+    }
+
+    arrput(*palette, ((ColourEntry){d, col, spread}));
+
+    /* Ordina crescente per posizione */
+    for (size_t i = 0; i + 1 < arrlen(*palette); i++) {
+        for (size_t j = i + 1; j < arrlen(*palette); j++) {
+            if ((*palette)[i].first > (*palette)[j].first) {
+                ColourEntry tmp = (*palette)[i];
+                (*palette)[i] = (*palette)[j];
+                (*palette)[j] = tmp;
+            }
+        }
+    }
+}
+
+/* Sampling: somma pesata di tutte le entry la cui distanza (wrap) <= spread.
+   Peso lineare (1.0 in centro -> 0.0 al limite). Normalizza RGB(A). */
+Color Palette_Sample(ColourEntry **palette, double t)
+{
+    if (arrlen(*palette) == 0)
+        return BLACK;
+    if (arrlen(*palette) == 1)
+        return (*palette)[0].second;
+
+    double pos = fmod(t, 1.0);
+    if (pos < 0.0) pos += 1.0;
+
+    double r_acc = 0.0, g_acc = 0.0, b_acc = 0.0, a_acc = 0.0;
+    double weight_sum = 0.0;
+
+    for (size_t i = 0; i < arrlen(*palette); i++) {
+        double center = (*palette)[i].first;
+        double spread = (*palette)[i].spread;
+        /* distanza circolare minima */
+        double dist = fabs(pos - center);
+//        if (dist > 0.5) dist = 1.0 - dist;
+
+        if (spread <= 0.0) {
+            if (dist == 0.0) {
+                return (*palette)[i].second;
+            } else continue;
+        }
+
+        if (dist <= spread) {
+            /* calcola peso in base a g_weight_mode */
+            double w = 0.0;
+            switch (g_weight_mode) {
+            case WEIGHT_LINEAR:
+                w = weight_linear(dist, spread);
+                break;
+            case WEIGHT_QUADRATIC:
+                w = weight_quadratic(dist, spread);
+                break;
+            case WEIGHT_GAUSSIAN:
+                w = weight_gaussian(dist, spread, g_weight_gaussian_sigma);
+                break;
+            case WEIGHT_COSINE:
+                w = weight_cosine(dist, spread);
+                break;
+            }
+            r_acc += w * (double)(*palette)[i].second.r;
+            g_acc += w * (double)(*palette)[i].second.g;
+            b_acc += w * (double)(*palette)[i].second.b;
+            a_acc += w * (double)(*palette)[i].second.a;
+            weight_sum += w;
+        }
+    }
+
+    if (weight_sum <= 0.0) return BLACK;
+
+    Color out;
+    out.r = (unsigned char)fmin(fmax((int)round(r_acc / weight_sum), 0), 255);
+    out.g = (unsigned char)fmin(fmax((int)round(g_acc / weight_sum), 0), 255);
+    out.b = (unsigned char)fmin(fmax((int)round(b_acc / weight_sum), 0), 255);
+    out.a = (unsigned char)fmin(fmax((int)round(a_acc / weight_sum), 0), 255);
+    return out;
+}
+
 /* Window */
 #define WIDTH 1050
 #define HEIGHT 700
@@ -70,12 +297,49 @@ static float *cell_activity;
 
 #define GRID_COLS 40
 #define GRID_ROWS 25
-#define CELLS (GRID_COLS*GRID_ROWS)
+#define CELLS (GRID_COLS*GRID_ROWS) // this number needs to be == N == NE+NI
 
 #define GRID_W (WIDTH - 2*MARGIN)
 #define GRID_H (HEIGHT - 2*MARGIN)
 const float CELL_W = ((float)GRID_W / (float)GRID_COLS);
 const float CELL_H = ((float)GRID_H / (float)GRID_ROWS);
+
+/* Delay queues: for each delay (1..MAX_DELAY) maintain list of targets arriving after that many ms */
+typedef struct
+{
+    int *neuron;   /* target neuron ids */
+    float *weight; /* corresponding weights */
+    int count;
+    int cap;
+} DelayBucket;
+
+/* Outgoing connections structure */
+typedef struct
+{
+    int *targets;            /* CE or CI targets */
+    float *weights;          /* corresponding weights */
+    unsigned char *delay;    /* delays in ms (for excitatory) */
+} OutConn;
+
+#define VUBUF_MS 2000
+typedef struct
+{
+	double a;
+	double b;
+	double c;
+	double d;
+
+	double v;
+	double u;
+
+	/* per-neuron last spike time for STDP (ms), initialize to very negative */
+	int last_spike_time;
+	/* per-neuron v history buffer for selected trace (circular) */
+	float v_hist[VUBUF_MS]; /* v_hist[neuron][idx] */
+	/* per-neuron u history buffer for selected trace (circular) */
+	float u_hist[VUBUF_MS]; /* u_hist[neuron][idx] */
+	OutConn outconn;                        /* size N */
+} IzkNeuron;
 
 typedef struct
 {
@@ -117,14 +381,14 @@ int pick_random_cells_in_annulus(int rc, int cc, int rmin, int rmax, int k, Cell
         }
     }
     if (cnt == 0) {
-        free(candidates);
+        free(candidates); candidates = NULL;
         return 0;
     }
 
     // Se k >= cnt prendiamo tutti
     if (k >= cnt) {
         for (int i = 0; i < cnt; i++) out[i] = candidates[i];
-        free(candidates);
+        free(candidates); candidates = NULL;
         return cnt;
     }
 
@@ -138,29 +402,12 @@ int pick_random_cells_in_annulus(int rc, int cc, int rmin, int rmax, int k, Cell
         out[i] = candidates[i];
     }
 
-    free(candidates);
+    free(candidates); candidates = NULL;
     return k;
 }
 
 /* Raster storage */
 #define FIRING_BUF 2000000 /* pair (time, neuron) capacity */
-
-/* Delay queues: for each delay (1..MAX_DELAY) maintain list of targets arriving after that many ms */
-typedef struct
-{
-    int *neuron;   /* target neuron ids */
-    float *weight; /* corresponding weights */
-    int count;
-    int cap;
-} DelayBucket;
-
-/* Outgoing connections structure */
-typedef struct
-{
-    int *targets;            /* CE or CI targets */
-    float *weights;          /* corresponding weights */
-    unsigned char *delay;    /* delays in ms (for excitatory) */
-} OutConn;
 
 /* STDP parameters (pair-based) */
 #define A_plus 0.1f
@@ -171,24 +418,16 @@ typedef struct
 #define W_MAX 10.0f
 
 /* Globals */
-static float *v;
-static float *u;
-static OutConn *outconn;                        /* size N */
+static IzkNeuron *neurons;
 static DelayBucket delaybuckets[MAX_DELAY+1];   /* index 1..MAX_DELAY used; 0 unused */
 static int current_delay_index = 0;             /* rotates every ms */
 static int *firing_times;                         /* circular buffer of pairs (time, neuron) */
 static int firing_count = 0;
 static int firing_cap = FIRING_BUF;
 
-/* per-neuron last spike time for STDP (ms), initialize to very negative */
-static int *last_spike_time;
-
-/* per-neuron v history buffer for selected trace (circular) */
-#define VUBUF_MS 2000
-static float (*v_hist)[VUBUF_MS]; /* v_hist[neuron][idx] */
+/* per-neuron v history index for selected trace (circular) */
 static int vhist_idx = 0;
-/* per-neuron u history buffer for selected trace (circular) */
-static float (*u_hist)[VUBUF_MS]; /* u_hist[neuron][idx] */
+/* per-neuron u history index for selected trace (circular) */
 static int uhist_idx = 0;
 
 /* Selected neuron */
@@ -263,50 +502,45 @@ static void bucket_clear(DelayBucket *db)
 /* Initialize network (connections, weights, delays, v/u, buffers) */
 static void init_network(void)
 {
+	arrsetlen(neurons, N);
     /* allocate */
-    v = (float*)malloc(N * sizeof(float));
-    u = (float*)malloc(N * sizeof(float));
-    outconn = (OutConn*)malloc(N * sizeof(OutConn));
     firing_times = (int*)malloc(firing_cap * 2 * sizeof(int));
-    last_spike_time = (int*)malloc(N * sizeof(int));
-    v_hist = (float(*)[VUBUF_MS])malloc(N * VUBUF_MS * sizeof(float));
-    u_hist = (float(*)[VUBUF_MS])malloc(N * VUBUF_MS * sizeof(float));
 
     cell_activity = (float*)calloc(CELLS, sizeof(float));
 
     /* init neurons */
     for (int i = 0; i < N;i++) {
         float r = frandf()*frandf();
-        v[i] = -65.0f + 15.0f * r;
+        neurons[i].v = -65.0f + 15.0f * r;
         if (i < NE)
-            u[i] = 0.2f * v[i];
+        	neurons[i].u = 0.2f * neurons[i].v;
         else
-            u[i] = 0.2f * v[i];
-        last_spike_time[i] = -1000000;
+        	neurons[i].u = 0.2f * neurons[i].v;
+        neurons[i].last_spike_time = -1000000;
         for (int k = 0; k < VUBUF_MS; k++) {
-        	v_hist[i][k] = v[i];
-        	u_hist[i][k] = u[i];
+        	neurons[i].v_hist[k] = neurons[i].v;
+        	neurons[i].u_hist[k] = neurons[i].u;
         }
     }
 
     /* init connections */
     for (int i = 0; i < N;i++) {
         int K = (i < NE) ? CE : CI;
-        outconn[i].targets = (int*)malloc(K * sizeof(int));
-        outconn[i].weights = (float*)malloc(K * sizeof(float));
-        outconn[i].delay = (unsigned char*)malloc(K * sizeof(unsigned char));
+        neurons[i].outconn.targets = (int*)malloc(K * sizeof(int));
+        neurons[i].outconn.weights = (float*)malloc(K * sizeof(float));
+        neurons[i].outconn.delay = (unsigned char*)malloc(K * sizeof(unsigned char));
         for (int j = 0; j < K; j++) {
             int t = rand() % N;
-            outconn[i].targets[j] = t;
+            neurons[i].outconn.targets[j] = t;
             if (i < NE) {
                 /* excitatory initial weight random around 6.0 +- */
-                outconn[i].weights[j] = 6.0f * frandf();
+            	neurons[i].outconn.weights[j] = 6.0f * frandf();
                 /* excitatory delay 1..MAX_DELAY */
-                outconn[i].delay[j] = (unsigned char)(1 + (rand() % MAX_DELAY));
+            	neurons[i].outconn.delay[j] = (unsigned char)(1 + (rand() % MAX_DELAY));
             } else {
                 /* inhibitory negative weight */
-                outconn[i].weights[j] = -5.0f * frandf();
-                outconn[i].delay[j] = 1; /* inhibitory delay 1 ms */
+            	neurons[i].outconn.weights[j] = -5.0f * frandf();
+            	neurons[i].outconn.delay[j] = 1; /* inhibitory delay 1 ms */
             }
         }
     }
@@ -321,20 +555,15 @@ static void init_network(void)
 /* Free network memory */
 static void free_network(void)
 {
-    if (!v)
+    if (!neurons)
         return;
     for (int i = 0; i < N; i++) {
-        free(outconn[i].targets);
-        free(outconn[i].weights);
-        free(outconn[i].delay);
+        free(neurons[i].outconn.targets);
+        free(neurons[i].outconn.weights);
+        free(neurons[i].outconn.delay);
     }
-    free(outconn);
-    free(v);
-    free(u);
+    arrfree(neurons);
     free(firing_times);
-    free(last_spike_time);
-    free(v_hist);
-    free(u_hist);
     for (int d = 0; d <= MAX_DELAY; d++) {
         free(delaybuckets[d].neuron);
         free(delaybuckets[d].weight);
@@ -368,22 +597,23 @@ static void apply_stdp_on_pre(int pre, int t_pre)
     int K = CE; /* only excitatory neurons have CE */
     if (pre >= NE) /* only excitatory synapses are plastic */
         return;
-    for (int j = 0; j < K; j++) {
-        int post = outconn[pre].targets[j];
-        int t_post = last_spike_time[post];
+    for (int i = 0; i < K; i++) {
+        int post = neurons[pre].outconn.targets[i];
+        int t_post = neurons[post].last_spike_time;
         if (t_post <= -100000)
             continue;
         int dt = t_pre - t_post; /* positive if pre after post => depression */
         if (dt > 0 && dt < 1000) {
             /* pre after post -> LTD (A_minus), dt positive */
             float dw = -A_minus * expf(- (float)dt / TAU_MINUS);
-            outconn[pre].weights[j] += dw;
+            neurons[pre].outconn.weights[i] += dw;
         } else {
             /* pre before post => potentiation handled when post spikes, to keep symmetry we handle both sides:
                We'll also handle LTP when pre precedes post by applying when post spikes (below). */
         }
         /* clamp */
-        outconn[pre].weights[j] = clampf(outconn[pre].weights[j], W_MIN, W_MAX);
+        neurons[pre].outconn.weights[i] =
+        		clampf(neurons[pre].outconn.weights[i], W_MIN, W_MAX);
     }
 }
 
@@ -397,17 +627,17 @@ static void apply_stdp_on_post(int post, int t_post)
     for (int pre = 0; pre < NE; pre++) {
         int K = CE;
         for (int j = 0; j < K; j++) {
-            if (outconn[pre].targets[j] != post)
+            if (neurons[pre].outconn.targets[j] != post)
                 continue;
-            int t_pre = last_spike_time[pre];
+            int t_pre = neurons[pre].last_spike_time;
             if (t_pre <= -100000)
                 continue;
             int dt = t_post - t_pre; /* positive if post after pre => potentiation */
             if (dt > 0 && dt < 1000) {
                 float dw = A_plus * expf(- (float)dt / TAU_PLUS);
-                outconn[pre].weights[j] += dw;
+                neurons[pre].outconn.weights[j] += dw;
                 /* clamp */
-                outconn[pre].weights[j] = clampf(outconn[pre].weights[j], W_MIN, W_MAX);
+                neurons[pre].outconn.weights[j] = clampf(neurons[pre].outconn.weights[j], W_MIN, W_MAX);
             }
         }
     }
@@ -416,9 +646,9 @@ static void apply_stdp_on_post(int post, int t_post)
 /* Schedule a delivered event: place target in delay bucket for appropriate arrival time */
 static void schedule_spike_delivery(int pre, int conn_index)
 {
-    int post = outconn[pre].targets[conn_index];
-    float w = outconn[pre].weights[conn_index];
-    int delay = outconn[pre].delay[conn_index];
+    int post = neurons[pre].outconn.targets[conn_index];
+    float w = neurons[pre].outconn.weights[conn_index];
+    int delay = neurons[pre].outconn.delay[conn_index];
     if (delay < 1)
         delay = 1;
     if (delay > MAX_DELAY)
@@ -460,15 +690,15 @@ static void sim_step(void)
 //        float c = (i < NE) ? -65.0f : -65.0f;
 //        float d = (i < NE) ? 8.0f : 2.0f;
     	for (int step = 0; step < num_steps; ++step) {
-            float dv = 0.04f * v[i] * v[i] + 5.0f * v[i] + 140.0f - u[i] + I[i];
-            v[i] += dv * (DT / (float)num_steps);
+            float dv = 0.04f * neurons[i].v * neurons[i].v + 5.0f * neurons[i].v + 140.0f - neurons[i].u + I[i];
+            neurons[i].v += dv * (DT / (float)num_steps);
 		}
-        u[i] += a * (b * v[i] - u[i]) * (DT / (float)num_steps);
+    	neurons[i].u += a * (b * neurons[i].v - neurons[i].u) * (DT / (float)num_steps);
     }
 
     /* 4) Check for spikes (v >= 30) */
     for (int i = 0; i < N; i++) {
-        if (v[i] >= 30.0f) {
+        if (neurons[i].v >= 30.0f) {
             /* record spike */
             add_firing_record(t_ms, i);
             /* STDP: apply pre-spike rule (depression for pre after recent post) */
@@ -476,8 +706,8 @@ static void sim_step(void)
             /* reset */
             float d = (i < NE) ? 8.0f : 2.0f;
             float c = (i < NE) ? -65.0f : -65.0f;
-            v[i] = c;
-            u[i] += d;
+            neurons[i].v = c;
+            neurons[i].u += d;
             /* schedule deliveries to targets according to their delays */
             int K = (i < NE) ? CE : CI;
             for (int j = 0; j < K; j++) {
@@ -486,7 +716,7 @@ static void sim_step(void)
             /* STDP: handle post-spike LTP for incoming excitatory synapses */
             apply_stdp_on_post(i, t_ms);
             /* update last spike time */
-            last_spike_time[i] = t_ms;
+            neurons[i].last_spike_time = t_ms;
         }
     }
 
@@ -496,8 +726,8 @@ static void sim_step(void)
     vhist_idx = (vhist_idx + 1) % VUBUF_MS;
     uhist_idx = (uhist_idx + 1) % VUBUF_MS;
     for (int i = 0; i < N; i++) {
-    	v_hist[i][vhist_idx] = v[i];
-    	u_hist[i][uhist_idx] = u[i];
+    	neurons[i].v_hist[vhist_idx] = neurons[i].v;
+    	neurons[i].u_hist[uhist_idx] = neurons[i].u;
     }
 }
 
@@ -508,7 +738,7 @@ static float mean_exc_weight(void)
     long cnt = 0;
     for (int i = 0; i < NE; i++) {
         for (int j = 0; j < CE; j++) {
-            s += outconn[i].weights[j];
+            s += neurons[i].outconn.weights[j];
             cnt++;
         }
     }
@@ -536,23 +766,27 @@ static int neuron_from_raster_click(int click_x, int click_y, int rx, int ry, in
     return nid;
 }
 
-Vector2 xy_from_cellpos(CellPos cp)
+/* helper: convert index -> row,col and viceversa */
+static inline CellPos index_to_cellpos(int idx, int *r, int *c) {
+    *r = idx / GRID_COLS;
+    *c = idx % GRID_COLS;
+	return (CellPos){ *r, *c };
+}
+static inline int cellpos_to_index(int r, int c) {
+    if (r < 0)
+    	r = (r % GRID_ROWS + GRID_ROWS) % GRID_ROWS;
+    if (c < 0)
+    	c = (c % GRID_COLS + GRID_COLS) % GRID_COLS;
+    return r * GRID_COLS + c;
+}
+/* helper: convert row,col -> x,y (cell's top left+MARGIN) */
+static inline Vector2 cellpos_to_vec2(CellPos cp)
 {
 	Vector2 ret = {0};
     ret.x = MARGIN + cp.c * CELL_W;
     ret.y = MARGIN + cp.r * CELL_H;
     return ret;
 }
-
-static CellPos cellpos_from_neuron_idx(int neuron_idx)
-{
-	CellPos ret = {
-			.r = neuron_idx / GRID_COLS,
-			.c = neuron_idx % GRID_COLS
-	};
-	return ret;
-}
-
 
 /* Find neuron by clicking raster: map x,y to time and neuron id */
 static int neuron_from_grid_click(int click_x, int click_y, int rx, int ry, int rw, int rh)
@@ -603,8 +837,8 @@ static void draw_selected_trace(int sx, int sy, int sw, int sh)
         while (pos < 0)
             pos += VUBUF_MS;
         pos %= VUBUF_MS;
-        vv = v_hist[selected_neuron][pos];
-        uu = u_hist[selected_neuron][pos];
+        vv = neurons[selected_neuron].v_hist[pos];
+        uu = neurons[selected_neuron].u_hist[pos];
         /* map vv (-100..40) to y */
         float vnorm = (vv + 100.0f) / 140.0f;
         float unorm = (uu + 100.0f) / 140.0f;
@@ -646,7 +880,7 @@ void compute_cell_activity(void)
 //            metric += fabsf(syn[i].g_gabaa);
 //        if (disp_gabab)
 //            metric += 0.5f * fabsf(syn[i].g_gabab);
-        float vdep = v[i] + 65.0f;
+        float vdep = neurons[i].v + 65.0f;
         if (vdep > 0.0f)
             metric += 0.02f * vdep;
         cell_activity[cell] += metric;
@@ -663,48 +897,12 @@ void compute_cell_activity(void)
 
 void show_grid()
 {
+    DrawRectangleLines(MARGIN, MARGIN, GRID_W, GRID_H, WHITE);
     for (int r = 0; r < GRID_ROWS; r++) {
         for (int c = 0; c < GRID_COLS; c++) {
             int idx = r*GRID_COLS + c;
-            float val = cell_activity[idx]; // 0..1
-            // color map: blue -> cyan -> green -> yellow -> red
-            Color col;
-            if (val <= 0.2f) {
-                float t = val / 0.2f;
-                col.r = (unsigned char)(0 + t * 0);
-                col.g = (unsigned char)(0 + t * 180);
-                col.b = (unsigned char)(32 + t * 135);
-                col.a = 255;
-                if (idx >= NE) {
-                    unsigned char tmp = col.r;
-                    col.r = col.b;
-                    col.b = tmp;
-                }
-            } else if (val <= 0.4f) {
-                float t = (val - 0.2f) / 0.2f;
-                col.r = (unsigned char)(0 + t * 0);
-                col.g = (unsigned char)(180 + t * 75);
-                col.b = (unsigned char)(255 - t * 255);
-                col.a = 255;
-            } else if (val <= 0.6f) {
-                float t = (val - 0.4f) / 0.2f;
-                col.r = (unsigned char)(0 + t * 200);
-                col.g = (unsigned char)(255 - t * 55);
-                col.b = (unsigned char)(0 + t * 0);
-                col.a = 255;
-            } else if (val <= 0.8f) {
-                float t = (val - 0.6f) / 0.2f;
-                col.r = (unsigned char)(200 + t * 55);
-                col.g = (unsigned char)(200 - t * 150);
-                col.b = 0;
-                col.a = 255;
-            } else {
-                float t = (val - 0.8f) / 0.2f;
-                col.r = (unsigned char)(255);
-                col.g = (unsigned char)(50 + t * 0);
-                col.b = 0;
-                col.a = 255;
-            }
+            float val = cell_activity[idx];
+            Color col = Palette_Sample(&palette, val);
             int x = MARGIN + c * CELL_W;
             int y = MARGIN + r * CELL_H;
             DrawRectangle(x+1, y+1, CELL_W - 1, CELL_H - 1, col);
@@ -728,6 +926,8 @@ void show_grid()
 int main(void)
 {
     srand((unsigned)time(NULL));
+
+    Palette_init(&palette, STOCK_COLDHOT);
 
     // Parametri di esempio
     int rmin = 3;
@@ -859,9 +1059,10 @@ int main(void)
 
                     // evidenzia celle disponibili nell'anello (trasparente)
                     for (int ni = 0; ni < N; ++ni) {
-                    	CellPos cp = cellpos_from_neuron_idx(ni);
+                    	CellPos cp = {0};
+                    	cp = index_to_cellpos(ni, &cp.r, &cp.c);
                         if (in_annulus(cp.r, cp.c, center_r, center_c, rmin, rmax)) {
-                        	Vector2 xy = xy_from_cellpos(cp);
+                        	Vector2 xy = cellpos_to_vec2(cp);
                             DrawRectangle(xy.x+1, xy.y+1, CELL_W - 1, CELL_H - 1, (Color){200, 230, 255, 80});
                         }
 					}
@@ -871,7 +1072,7 @@ int main(void)
                     	CellPos cp = {0};
                     	cp.r = selected[i].r;
                     	cp.c = selected[i].c;
-                    	Vector2 xy = xy_from_cellpos(cp);
+                    	Vector2 xy = cellpos_to_vec2(cp);
                         DrawRectangle(xy.x+2, xy.y+2, CELL_W-4, CELL_H-4, (Color){ 253, 249, 0, 80 });
                     }
 
@@ -950,7 +1151,7 @@ int main(void)
                         step = 1;
                     int idx = 0;
                     for (int i = 0; i < N && idx < M; i += step, idx++) {
-                        float vv = v[i];
+                        float vv = neurons[i].v;
                         float norm = (vv + 100.0f) / 140.0f;
                         if (norm < 0)
                             norm = 0;
