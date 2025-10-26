@@ -13,7 +13,9 @@ typedef enum
 {
     STOCK_EMPTY,
     STOCK_GREYSCALE,
-    STOCK_COLDHOT,
+    STOCK_COLDHOT1,
+    STOCK_COLDHOT2,
+    STOCK_COLDHOT3,
     STOCK_SPECTRUM,
 } Stock;
 

@@ -37,6 +37,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <stdint.h>
 
 #include <raylib.h>
 #define RAYMATH_IMPLEMENTATION
@@ -83,6 +84,26 @@ static float *cell_activity;
 #define GRID_H (HEIGHT - 2*MARGIN)
 const float CELL_W = ((float)GRID_W / (float)GRID_COLS);
 const float CELL_H = ((float)GRID_H / (float)GRID_ROWS);
+
+float d_sqrt(float number)
+{
+    int i;
+    float x, y;
+    x = number * 0.5;
+    y = number;
+    i = *(int*)&y;
+    i = 0x5f3759df - (i >> 1);
+    y = *(float*)&i;
+    y = y * (1.5 - (x * y * y));
+    y = y * (1.5 - (x * y * y));
+    return number * y;
+}
+
+uint f_randi(uint32_t index)
+{
+    index = (index << 13) ^ index;
+    return ((index * (index * index * 15731 + 789221) + 1376312589) & 0x7fffffff);
+}
 
 /* Delay queues: for each delay (1..MAX_DELAY) maintain list of targets arriving after that many ms */
 typedef struct
@@ -289,7 +310,7 @@ static void init_network(void)
     cell_activity = (float*)calloc(CELLS, sizeof(float));
 
     /* init neurons */
-    for (int i = 0; i < N;i++) {
+    for (int i = 0; i < N; i++) {
         float r = frandf()*frandf();
         neurons[i].v = -65.0f + 15.0f * r;
         if (i < NE)
@@ -304,7 +325,7 @@ static void init_network(void)
     }
 
     /* init connections */
-    for (int i = 0; i < N;i++) {
+    for (int i = 0; i < N; i++) {
         int K = (i < NE) ? CE : CI;
         neurons[i].outconn.targets = (int*)malloc(K * sizeof(int));
         neurons[i].outconn.weights = (float*)malloc(K * sizeof(float));
@@ -707,7 +728,7 @@ int main(void)
 {
     srand((unsigned)time(NULL));
 
-    Palette_init(&palette, STOCK_COLDHOT);
+    Palette_init(&palette, STOCK_COLDHOT3);
 
     // Parametri di esempio
     int rmin = 3;
@@ -839,27 +860,22 @@ int main(void)
 
                     // evidenzia celle disponibili nell'anello (trasparente)
                     for (int ni = 0; ni < N; ++ni) {
-                    	CellPos cp = {0};
-                    	cp = index_to_cellpos(ni, &cp.r, &cp.c);
-                        if (in_annulus(cp.r, cp.c, center_r, center_c, rmin, rmax)) {
-                        	Vector2 xy = cellpos_to_vec2(cp);
-                            DrawRectangle(xy.x+1, xy.y+1, CELL_W - 1, CELL_H - 1, (Color){200, 230, 255, 80});
+                    	CellPos cell_rc = {0};
+                    	cell_rc = index_to_cellpos(ni, &cell_rc.r, &cell_rc.c);
+                        if (in_annulus(cell_rc.r, cell_rc.c, center_r, center_c, rmin, rmax)) {
+                        	Vector2 cell_xy = cellpos_to_vec2(cell_rc);
+                            DrawRectangle(cell_xy.x+1, cell_xy.y+1, CELL_W - 1, CELL_H - 1, (Color){200, 230, 255, 80});
                         }
 					}
 
-                    // disegna celle selezionate
                     for (int i = 0; i < selected_count; i++) {
+                        // selected cell
                     	CellPos cp = {0};
                     	cp.r = selected[i].r;
                     	cp.c = selected[i].c;
                     	Vector2 xy = cellpos_to_vec2(cp);
                         DrawRectangle(xy.x+2, xy.y+2, CELL_W-4, CELL_H-4, (Color){ 253, 249, 0, 80 });
                     }
-
-                    // testo di stato
-                    DrawText(TextFormat("Center: (%d,%d)  rmin=%d  rmax=%d  selected=%d", center_r, center_c, rmin, rmax, selected_count),
-                             10, GRID_H - 20, 10, GRAY);
-                    DrawText("Space: new pick  Click: set center  Up/Down: rmin  RIGHT/LEFT: rmax", 10, GRID_H - 36, 10, GRAY);
 
                     if (selected_neuron >= 0) {
                         /* selected neuron trace */
@@ -878,6 +894,27 @@ int main(void)
                         DrawRectangleLines(sx-1, sy-1, sw+2, sh+2, LIGHTGRAY);
                         draw_selected_trace(sx, sy, sw, sh);
                     }
+
+                    if (selected_neuron >= 0) {
+                        int K = CE; /* only excitatory neurons have CE */
+                        for (int i = 0; i < K; ++i) {
+                            int post = neurons[selected_neuron].outconn.targets[i];
+                            CellPos this_cell_pos_rc = {0};
+                            CellPos post_cell_pos_rc = {0};
+                            this_cell_pos_rc = index_to_cellpos(selected_neuron, &this_cell_pos_rc.r, &this_cell_pos_rc.c);
+                            post_cell_pos_rc = index_to_cellpos(post, &post_cell_pos_rc.r, &post_cell_pos_rc.c);
+                            Vector2 this_cell_pos_xy = cellpos_to_vec2(this_cell_pos_rc);
+                            Vector2 post_cell_pos_xy = cellpos_to_vec2(post_cell_pos_rc);
+                            this_cell_pos_xy = Vector2Add(this_cell_pos_xy, (Vector2){ CELL_W/2, CELL_H/2 });
+                            post_cell_pos_xy = Vector2Add(post_cell_pos_xy, (Vector2){ CELL_W/2, CELL_H/2 });
+                            DrawLineV(this_cell_pos_xy, post_cell_pos_xy, WHITE);
+                        }
+                    }
+
+                    // testo di stato
+                    DrawText(TextFormat("Center: (%d,%d)  rmin=%d  rmax=%d  selected=%d", center_r, center_c, rmin, rmax, selected_count),
+                             10, GRID_H - 20, 10, GRAY);
+                    DrawText("Space: new pick  Click: set center  Up/Down: rmin  RIGHT/LEFT: rmax", 10, GRID_H - 36, 10, GRAY);
                 }
                 if (graphics_raster) {
                     /* Raster */

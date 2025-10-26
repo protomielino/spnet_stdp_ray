@@ -14,7 +14,9 @@ typedef enum
 {
     STOCK_EMPTY,
     STOCK_GREYSCALE,
-    STOCK_COLDHOT,
+    STOCK_COLDHOT1,
+    STOCK_COLDHOT2,
+    STOCK_COLDHOT3,
     STOCK_SPECTRUM,
 } Stock;
 
@@ -100,27 +102,58 @@ void Palette_SetGaussianSigma(double s) { g_weight_gaussian_sigma = s; }
 void Palette_init(ColourEntry **palette, Stock stock)
 {
     arrfree(*palette);
+    float nc = 0;
+    float ci = 0;
+    float val = 1.0;
+    float spread = 0;
     switch (stock)
     {
     case STOCK_EMPTY:
         break;
     case STOCK_GREYSCALE:
-        arrput(*palette, ((ColourEntry){0.0, BLACK, 1.0}));
-        arrput(*palette, ((ColourEntry){1.0, WHITE, 1.0}));
+        nc = 2 - 1;
+        spread = val/nc;
+        arrput(*palette, ((ColourEntry){ci++/nc, BLACK, spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, WHITE, spread}));
         break;
-    case STOCK_COLDHOT:
-        arrput(*palette, ((ColourEntry){0.0, CYAN, 0.5}));
-        arrput(*palette, ((ColourEntry){0.5, BLACK, 0.5}));
-        arrput(*palette, ((ColourEntry){1.0, YELLOW, 0.5}));
+    case STOCK_COLDHOT1:
+        nc = 4 - 1;
+        spread = val/nc;
+        arrput(*palette, ((ColourEntry){ci++/nc, BLACK,  spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, CYAN,   spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, RED,    spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, YELLOW, spread}));
+        break;
+    case STOCK_COLDHOT2:
+        nc = 6 - 1;
+        spread = 1.0/nc;
+        arrput(*palette, ((ColourEntry){ci++/nc, BLACK,  spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, BLUE,   spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, CYAN,   spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, GREEN,  spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, YELLOW, spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, RED,    spread}));
+        break;
+    case STOCK_COLDHOT3:
+        nc = 6 - 1;
+        spread = val/nc;
+        arrput(*palette, ((ColourEntry){ci++/nc, BLACK,  spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, (Color){ (               0), (      spread*180), ( 32 + spread*135), 255 }, spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, (Color){ (               0), (180 + spread* 75), (255 - spread*255), 255 }, spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, (Color){ (      spread*200), (255 - spread* 55), (               0), 255 }, spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, (Color){ (200 + spread* 55), (200 - spread*150), (               0), 255 }, spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, (Color){ (             255), (              50), (               0), 255 }, spread}));
         break;
     case STOCK_SPECTRUM:
-        arrput(*palette, ((ColourEntry){0.0 / 6.0, RED, 1.0 / 6.0}));
-        arrput(*palette, ((ColourEntry){1.0 / 6.0, YELLOW, 1.0 / 6.0}));
-        arrput(*palette, ((ColourEntry){2.0 / 6.0, GREEN, 1.0 / 6.0}));
-        arrput(*palette, ((ColourEntry){3.0 / 6.0, CYAN, 1.0 / 6.0}));
-        arrput(*palette, ((ColourEntry){4.0 / 6.0, BLUE, 1.0 / 6.0}));
-        arrput(*palette, ((ColourEntry){5.0 / 6.0, MAGENTA, 1.0 / 6.0}));
-        arrput(*palette, ((ColourEntry){6.0 / 6.0, RED, 1.0 / 6.0}));
+        nc = 7 - 1;
+        spread = val/nc;
+        arrput(*palette, ((ColourEntry){ci++/nc, BLACK,   spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, RED,     spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, YELLOW,  spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, GREEN,   spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, CYAN,    spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, BLUE,    spread}));
+        arrput(*palette, ((ColourEntry){ci++/nc, MAGENTA, spread}));
         break;
     }
     /* Assicuriamoci ordinamento crescente per posizione */
@@ -309,7 +342,9 @@ int main(void)
         }
 
         if (IsKeyPressed(KEY_G)) { arrfree(palette); Palette_init(&palette, STOCK_GREYSCALE); }
-        if (IsKeyPressed(KEY_C)) { arrfree(palette); Palette_init(&palette, STOCK_COLDHOT); }
+        if (IsKeyPressed(KEY_C)) { arrfree(palette); Palette_init(&palette, STOCK_COLDHOT1); }
+        if (IsKeyPressed(KEY_V)) { arrfree(palette); Palette_init(&palette, STOCK_COLDHOT2); }
+        if (IsKeyPressed(KEY_B)) { arrfree(palette); Palette_init(&palette, STOCK_COLDHOT3); }
         if (IsKeyPressed(KEY_S)) { arrfree(palette); Palette_init(&palette, STOCK_SPECTRUM); }
         if (IsKeyPressed(KEY_E)) { arrfree(palette); Palette_init(&palette, STOCK_EMPTY); }
         if (IsKeyPressed(KEY_A)) {
