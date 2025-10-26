@@ -47,6 +47,7 @@
 #include "stb_ds.h"
 
 #include "palette.h"
+#include "neuron.h"
 
 ColourEntry *palette = NULL;
 
@@ -113,34 +114,6 @@ typedef struct
     int count;
     int cap;
 } DelayBucket;
-
-/* Outgoing connections structure */
-typedef struct
-{
-    int *targets;            /* CE or CI targets */
-    float *weights;          /* corresponding weights */
-    unsigned char *delay;    /* delays in ms (for excitatory) */
-} OutConn;
-
-#define VUBUF_MS 2000
-typedef struct
-{
-	double a;
-	double b;
-	double c;
-	double d;
-
-	double v;
-	double u;
-
-	/* per-neuron last spike time for STDP (ms), initialize to very negative */
-	int last_spike_time;
-	/* per-neuron v history buffer for selected trace (circular) */
-	float v_hist[VUBUF_MS]; /* v_hist[neuron][idx] */
-	/* per-neuron u history buffer for selected trace (circular) */
-	float u_hist[VUBUF_MS]; /* u_hist[neuron][idx] */
-	OutConn outconn;                        /* size N */
-} IzkNeuron;
 
 typedef struct
 {
@@ -318,7 +291,7 @@ static void init_network(void)
         else
         	neurons[i].u = 0.2f * neurons[i].v;
         neurons[i].last_spike_time = -1000000;
-        for (int k = 0; k < VUBUF_MS; k++) {
+        for (int k = 0; k < VUBUF_LEN_MS; k++) {
         	neurons[i].v_hist[k] = neurons[i].v;
         	neurons[i].u_hist[k] = neurons[i].u;
         }
@@ -524,8 +497,8 @@ static void sim_step(void)
     /* 5) advance delay index and time, update v history buffer index */
     current_delay_index = (current_delay_index + 1) % (MAX_DELAY+1);
     t_ms += DT;
-    vhist_idx = (vhist_idx + 1) % VUBUF_MS;
-    uhist_idx = (uhist_idx + 1) % VUBUF_MS;
+    vhist_idx = (vhist_idx + 1) % VUBUF_LEN_MS;
+    uhist_idx = (uhist_idx + 1) % VUBUF_LEN_MS;
     for (int i = 0; i < N; i++) {
     	neurons[i].v_hist[vhist_idx] = neurons[i].v;
     	neurons[i].u_hist[uhist_idx] = neurons[i].u;
@@ -621,23 +594,23 @@ static void draw_selected_trace(int sx, int sy, int sw, int sh)
         return;
     }
     char buf[128];
-    snprintf(buf, sizeof(buf), "Neuron %d  v,u(t) last %d ms", selected_neuron, VUBUF_MS);
+    snprintf(buf, sizeof(buf), "Neuron %d  v,u(t) last %d ms", selected_neuron, VUBUF_LEN_MS);
     DrawText(buf, sx+10, sy+10, 14, LIGHTGRAY);
 
     /* draw axes */
     DrawRectangleLines(sx, sy, sw, sh, LIGHTGRAY);
 
-    /* find time window: show last VUBUF_MS ms */
+    /* find time window: show last VUBUF_LEN_MS ms */
     int idx = vhist_idx;
     float vv;
     float uu;
     int vpx_prev = -1, vpy_prev = -1;
     int upx_prev = -1, upy_prev = -1;
-    for (int k = 0; k < VUBUF_MS; ++k) {
-        int pos = (idx - (VUBUF_MS-1) + k);
+    for (int k = 0; k < VUBUF_LEN_MS; ++k) {
+        int pos = (idx - (VUBUF_LEN_MS-1) + k);
         while (pos < 0)
-            pos += VUBUF_MS;
-        pos %= VUBUF_MS;
+            pos += VUBUF_LEN_MS;
+        pos %= VUBUF_LEN_MS;
         vv = neurons[selected_neuron].v_hist[pos];
         uu = neurons[selected_neuron].u_hist[pos];
         /* map vv (-100..40) to y */
@@ -647,7 +620,7 @@ static void draw_selected_trace(int sx, int sy, int sw, int sh)
         vnorm = vnorm > 1 ? 1 : vnorm;
         unorm = unorm < 0 ? 0 : unorm;
         unorm = unorm > 1 ? 1 : unorm;
-        float x = sx + 1 + ((float)k / (float)(VUBUF_MS-1) * (float)(sw-2));
+        float x = sx + 1 + ((float)k / (float)(VUBUF_LEN_MS-1) * (float)(sw-2));
         float vy = sy + 1 + 10 + ((1.0f - vnorm) * (sh - 20));
         float uy = sy + 1 + 10 + ((1.0f - unorm) * (sh - 20));
         Color vC = selected_neuron < NE ? GREEN : DARKGREEN;
