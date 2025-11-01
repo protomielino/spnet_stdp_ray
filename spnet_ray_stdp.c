@@ -29,7 +29,6 @@
   - Simplifications compared to full Izhikevich reference: STDP uses pair-based exponential windows,
     no homeostatic scaling, weight updates applied at spike times to outgoing excitatory synapses.
   - Performance tuned for moderate network size; reduce NE/CI/CE if too slow.
-
 */
 
 #include <stdio.h>
@@ -85,6 +84,11 @@ static float *cell_activity;
 #define GRID_H (HEIGHT - 2*MARGIN)
 const float CELL_W = ((float)GRID_W / (float)GRID_COLS);
 const float CELL_H = ((float)GRID_H / (float)GRID_ROWS);
+
+float rand01(void)
+{
+    return (float)rand() / (float)RAND_MAX;
+}
 
 float d_sqrt(float number)
 {
@@ -233,6 +237,28 @@ static float clampf(float x, float a, float b)
     return x;
 }
 
+/* helper: convert index -> row,col and viceversa */
+static inline CellPos index_to_cellpos(int idx, int *r, int *c) {
+    *r = idx / GRID_COLS;
+    *c = idx % GRID_COLS;
+    return (CellPos){ *r, *c };
+}
+static inline int cellpos_to_index(int r, int c) {
+    if (r < 0)
+        r = (r % GRID_ROWS + GRID_ROWS) % GRID_ROWS;
+    if (c < 0)
+        c = (c % GRID_COLS + GRID_COLS) % GRID_COLS;
+    return r * GRID_COLS + c;
+}
+/* helper: convert row,col -> x,y (cell's top left+MARGIN) */
+static inline Vector2 cellpos_to_vec2(CellPos cp)
+{
+    Vector2 ret = {0};
+    ret.x = MARGIN + cp.c * CELL_W;
+    ret.y = MARGIN + cp.r * CELL_H;
+    return ret;
+}
+
 /* Initialize delay buckets */
 static void init_delay_buckets(void)
 {
@@ -283,13 +309,20 @@ static void init_network(void)
     cell_activity = (float*)calloc(CELLS, sizeof(float));
 
     /* init neurons */
+    float ra = 0.0f;
+    float ra2 = 0.0f;
     for (int i = 0; i < N; i++) {
-        float r = frandf()*frandf();
-        neurons[i].v = -65.0f + 15.0f * r;
-        if (i < NE)
-        	neurons[i].u = 0.2f * neurons[i].v;
-        else
-        	neurons[i].u = 0.2f * neurons[i].v;
+        ra = rand01();
+        neurons[i].a = (i < NE) ? 0.02f : 0.02 +  0.08*ra;
+        ra = rand01();
+        neurons[i].b = (i < NE) ? 0.2f : 0.25 + -0.05*ra;;
+        ra = rand01(); ra2 = ra*ra;
+        neurons[i].c = (i < NE) ? -65.0 + 15.0*ra2 : -65.0f;
+        ra = rand01(); ra2 = ra*ra;
+        neurons[i].d = (i < NE) ? 8.0 + -6.0*ra2 : 2.0f;
+
+        neurons[i].v = neurons[i].c;
+        neurons[i].u = neurons[i].b * neurons[i].v;
         neurons[i].last_spike_time = -1000000;
         for (int k = 0; k < VUBUF_LEN_MS; k++) {
         	neurons[i].v_hist[k] = neurons[i].v;
@@ -456,41 +489,35 @@ static void sim_step(void)
             I[i] += 24.0f * frandf();
     }
 
-    /* 3) Integrate neuron dynamics (Izhikevich) */
     int num_steps = 2;
-    for (int i = 0; i < N; i++) {
-        float a = (i < NE) ? 0.02f : 0.1f;
-        float b = 0.2f;
-//        float c = (i < NE) ? -65.0f : -65.0f;
-//        float d = (i < NE) ? 8.0f : 2.0f;
-    	for (int step = 0; step < num_steps; ++step) {
+    for (int step = 0; step < num_steps; ++step) {
+        /* 3) Integrate neuron dynamics (Izhikevich) */
+        for (int i = 0; i < N; i++) {
             float dv = 0.04f * neurons[i].v * neurons[i].v + 5.0f * neurons[i].v + 140.0f - neurons[i].u + I[i];
             neurons[i].v += dv * (DT / (float)num_steps);
-		}
-    	neurons[i].u += a * (b * neurons[i].v - neurons[i].u) * (DT / (float)num_steps);
-    }
+            neurons[i].u += neurons[i].a * (neurons[i].b * neurons[i].v - neurons[i].u) * (DT / (float)num_steps);
+        }
 
-    /* 4) Check for spikes (v >= 30) */
-    for (int i = 0; i < N; i++) {
-        if (neurons[i].v >= 30.0f) {
-            /* record spike */
-            add_firing_record(t_ms, i);
-            /* STDP: apply pre-spike rule (depression for pre after recent post) */
-            apply_stdp_on_pre(i, t_ms);
-            /* reset */
-            float d = (i < NE) ? 8.0f : 2.0f;
-            float c = (i < NE) ? -65.0f : -65.0f;
-            neurons[i].v = c;
-            neurons[i].u += d;
-            /* schedule deliveries to targets according to their delays */
-            int K = (i < NE) ? CE : CI;
-            for (int j = 0; j < K; j++) {
-                schedule_spike_delivery(i, j);
+        /* 4) Check for spikes (v >= 30) */
+        for (int i = 0; i < N; i++) {
+            if (neurons[i].v >= 30.0f) {
+                /* record spike */
+                add_firing_record(t_ms, i);
+                /* STDP: apply pre-spike rule (depression for pre after recent post) */
+                apply_stdp_on_pre(i, t_ms);
+                /* reset */
+                neurons[i].v = neurons[i].c;
+                neurons[i].u += neurons[i].d;
+                /* schedule deliveries to targets according to their delays */
+                int K = (i < NE) ? CE : CI;
+                for (int j = 0; j < K; j++) {
+                    schedule_spike_delivery(i, j);
+                }
+                /* STDP: handle post-spike LTP for incoming excitatory synapses */
+                apply_stdp_on_post(i, t_ms);
+                /* update last spike time */
+                neurons[i].last_spike_time = t_ms;
             }
-            /* STDP: handle post-spike LTP for incoming excitatory synapses */
-            apply_stdp_on_post(i, t_ms);
-            /* update last spike time */
-            neurons[i].last_spike_time = t_ms;
         }
     }
 
@@ -538,28 +565,6 @@ static int neuron_from_raster_click(int click_x, int click_y, int rx, int ry, in
     if (nid >= N)
         nid = N-1;
     return nid;
-}
-
-/* helper: convert index -> row,col and viceversa */
-static inline CellPos index_to_cellpos(int idx, int *r, int *c) {
-    *r = idx / GRID_COLS;
-    *c = idx % GRID_COLS;
-	return (CellPos){ *r, *c };
-}
-static inline int cellpos_to_index(int r, int c) {
-    if (r < 0)
-    	r = (r % GRID_ROWS + GRID_ROWS) % GRID_ROWS;
-    if (c < 0)
-    	c = (c % GRID_COLS + GRID_COLS) % GRID_COLS;
-    return r * GRID_COLS + c;
-}
-/* helper: convert row,col -> x,y (cell's top left+MARGIN) */
-static inline Vector2 cellpos_to_vec2(CellPos cp)
-{
-	Vector2 ret = {0};
-    ret.x = MARGIN + cp.c * CELL_W;
-    ret.y = MARGIN + cp.r * CELL_H;
-    return ret;
 }
 
 /* Find neuron by clicking raster: map x,y to time and neuron id */
@@ -837,7 +842,7 @@ int main(void)
                     	cell_rc = index_to_cellpos(ni, &cell_rc.r, &cell_rc.c);
                         if (in_annulus(cell_rc.r, cell_rc.c, center_r, center_c, rmin, rmax)) {
                         	Vector2 cell_xy = cellpos_to_vec2(cell_rc);
-                            DrawRectangle(cell_xy.x+1, cell_xy.y+1, CELL_W - 1, CELL_H - 1, (Color){200, 230, 255, 80});
+                            DrawRectangleLines(cell_xy.x+1, cell_xy.y+1, CELL_W - 2, CELL_H - 2, (Color){200, 230, 255, 255});
                         }
 					}
 
@@ -847,7 +852,7 @@ int main(void)
                     	cp.r = selected[i].r;
                     	cp.c = selected[i].c;
                     	Vector2 xy = cellpos_to_vec2(cp);
-                        DrawRectangle(xy.x+2, xy.y+2, CELL_W-4, CELL_H-4, (Color){ 253, 249, 0, 80 });
+                        DrawRectangleLines(xy.x+2, xy.y+2, CELL_W-4, CELL_H-4, (Color){ 253, 249, 0, 255 });
                     }
 
                     if (selected_neuron >= 0) {
@@ -868,21 +873,21 @@ int main(void)
                         draw_selected_trace(sx, sy, sw, sh);
                     }
 
-                    if (selected_neuron >= 0) {
-                        int K = CE; /* only excitatory neurons have CE */
-                        for (int i = 0; i < K; ++i) {
-                            int post = neurons[selected_neuron].outconn.targets[i];
-                            CellPos this_cell_pos_rc = {0};
-                            CellPos post_cell_pos_rc = {0};
-                            this_cell_pos_rc = index_to_cellpos(selected_neuron, &this_cell_pos_rc.r, &this_cell_pos_rc.c);
-                            post_cell_pos_rc = index_to_cellpos(post, &post_cell_pos_rc.r, &post_cell_pos_rc.c);
-                            Vector2 this_cell_pos_xy = cellpos_to_vec2(this_cell_pos_rc);
-                            Vector2 post_cell_pos_xy = cellpos_to_vec2(post_cell_pos_rc);
-                            this_cell_pos_xy = Vector2Add(this_cell_pos_xy, (Vector2){ CELL_W/2, CELL_H/2 });
-                            post_cell_pos_xy = Vector2Add(post_cell_pos_xy, (Vector2){ CELL_W/2, CELL_H/2 });
-                            DrawLineV(this_cell_pos_xy, post_cell_pos_xy, WHITE);
-                        }
-                    }
+//                    if (selected_neuron >= 0) {
+//                        int K = CE; /* only excitatory neurons have CE */
+//                        for (int i = 0; i < K; ++i) {
+//                            int post = neurons[selected_neuron].outconn.targets[i];
+//                            CellPos this_cell_pos_rc = {0};
+//                            CellPos post_cell_pos_rc = {0};
+//                            this_cell_pos_rc = index_to_cellpos(selected_neuron, &this_cell_pos_rc.r, &this_cell_pos_rc.c);
+//                            post_cell_pos_rc = index_to_cellpos(post, &post_cell_pos_rc.r, &post_cell_pos_rc.c);
+//                            Vector2 this_cell_pos_xy = cellpos_to_vec2(this_cell_pos_rc);
+//                            Vector2 post_cell_pos_xy = cellpos_to_vec2(post_cell_pos_rc);
+//                            this_cell_pos_xy = Vector2Add(this_cell_pos_xy, (Vector2){ CELL_W/2, CELL_H/2 });
+//                            post_cell_pos_xy = Vector2Add(post_cell_pos_xy, (Vector2){ CELL_W/2, CELL_H/2 });
+//                            DrawLineV(this_cell_pos_xy, post_cell_pos_xy, WHITE);
+//                        }
+  //                  }
 
                     // testo di stato
                     DrawText(TextFormat("Center: (%d,%d)  rmin=%d  rmax=%d  selected=%d", center_r, center_c, rmin, rmax, selected_count),

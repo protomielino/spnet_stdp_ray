@@ -30,6 +30,8 @@ typedef struct
 
     OutConn outconn;            /* size N */
 
+    int is_exc;
+
     float cell_activity;        /* for grid visualization purpose */
 } IzkNeuron;
 
