@@ -1,6 +1,8 @@
 #ifndef NEURON_H_
 #define NEURON_H_
 
+#include <stdint.h>
+
 #define VUBUF_LEN_MS 2000
 
 /* Outgoing connections structure */
@@ -30,7 +32,7 @@ typedef struct
 
     OutConn outconn;            /* size N */
 
-    int is_exc;
+    uint8_t is_exc;
 
     float cell_activity;        /* for grid visualization purpose */
 } IzkNeuron;

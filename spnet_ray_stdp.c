@@ -299,47 +299,82 @@ static void bucket_clear(DelayBucket *db)
     db->count = 0;
 }
 
+int* array_permute(int *arr)
+{
+    if (arr == NULL || arrlen(arr) == 0) {
+        arrsetlen(arr, N);
+    }
+    for (int i = 0; i < N; ++i)
+        arr[i] = i;
+    for (int i = N-1; i > 0; --i) {
+        int j = rand() % (i+1);
+        int tmp = arr[i];
+        arr[i] = arr[j];
+        arr[j] = tmp;
+    }
+    return arr;
+}
+
 /* Initialize network (connections, weights, delays, v/u, buffers) */
 static void init_network(void)
 {
+    /* Alloca e imposti tutto eccitatorio/inibitorio casualmente:
+     * crea un array di N zeri, imposta NE posizioni a 1 senza
+     * ripetizione (Fisher–Yates)*/
+    /* flags: 1 = eccitatorio, 0 = inibitorio */
+    uint8_t *flags = (uint8_t*)calloc(N, sizeof(uint8_t));
+    int *pool = (int*)malloc(N * sizeof(int));
+    for (int i = 0; i < N; ++i)
+        pool[i] = i;
+    for (int k = 0; k < NE; ++k) {
+        int r = rand() % (N - k);
+        flags[pool[r]] = 1;
+        pool[r] = pool[N - k - 1]; /* rimosso dallo pool */
+    }
+    free(pool);
+
 	arrsetlen(neurons, N);
     /* allocate */
     firing_times = (int*)malloc(firing_cap * 2 * sizeof(int));
 
     cell_activity = (float*)calloc(CELLS, sizeof(float));
 
-    /* init neurons */
-    float ra = 0.0f;
-    float ra2 = 0.0f;
+    /* init neurons usando flags[i] */
     for (int i = 0; i < N; i++) {
+        float ra = 0.0f;
+        float ra2 = 0.0f;
+        int is_exc = flags[i];
+
+        neurons[i].is_exc = (uint8_t)is_exc;
+
         ra = rand01();
-        neurons[i].a = (i < NE) ? 0.02f : 0.02 +  0.08*ra;
+        neurons[i].a = is_exc ? 0.02f : 0.02f + 0.08f * ra;
         ra = rand01();
-        neurons[i].b = (i < NE) ? 0.2f : 0.25 + -0.05*ra;;
-        ra = rand01(); ra2 = ra*ra;
-        neurons[i].c = (i < NE) ? -65.0 + 15.0*ra2 : -65.0f;
-        ra = rand01(); ra2 = ra*ra;
-        neurons[i].d = (i < NE) ? 8.0 + -6.0*ra2 : 2.0f;
+        neurons[i].b = is_exc ? 0.2f : 0.25f - 0.05f * ra;
+        ra = rand01(); ra2 = ra * ra;
+        neurons[i].c = is_exc ? -65.0f + 15.0f * ra2 : -65.0f;
+        ra = rand01(); ra2 = ra * ra;
+        neurons[i].d = is_exc ? 8.0f - 6.0f * ra2 : 2.0f;
 
         neurons[i].v = neurons[i].c;
         neurons[i].u = neurons[i].b * neurons[i].v;
         neurons[i].last_spike_time = -1000000;
         for (int k = 0; k < VUBUF_LEN_MS; k++) {
-        	neurons[i].v_hist[k] = neurons[i].v;
-        	neurons[i].u_hist[k] = neurons[i].u;
+            neurons[i].v_hist[k] = neurons[i].v;
+            neurons[i].u_hist[k] = neurons[i].u;
         }
     }
 
-    /* init connections */
+    /* init connections usando flags[i] */
     for (int i = 0; i < N; i++) {
-        int K = (i < NE) ? CE : CI;
+        int K = flags[i] ? CE : CI;
         neurons[i].outconn.targets = (int*)malloc(K * sizeof(int));
         neurons[i].outconn.weights = (float*)malloc(K * sizeof(float));
         neurons[i].outconn.delay = (unsigned char*)malloc(K * sizeof(unsigned char));
         for (int j = 0; j < K; j++) {
             int t = rand() % N;
             neurons[i].outconn.targets[j] = t;
-            if (i < NE) {
+            if (flags[i]) {
                 /* excitatory initial weight random around 6.0 +- */
             	neurons[i].outconn.weights[j] = 6.0f * frandf();
                 /* excitatory delay 1..MAX_DELAY */
@@ -357,6 +392,8 @@ static void init_network(void)
     t_ms = 0;
     vhist_idx = 0;
     selected_neuron = -1;
+
+    free(flags);
 }
 
 /* Free network memory */
@@ -402,7 +439,7 @@ static void add_firing_record(int time_ms, int neuron)
 static void apply_stdp_on_pre(int pre, int t_pre)
 {
     int K = CE; /* only excitatory neurons have CE */
-    if (pre >= NE) /* only excitatory synapses are plastic */
+    if (!neurons[pre].is_exc) /* only excitatory synapses are plastic */
         return;
     for (int i = 0; i < K; i++) {
         int post = neurons[pre].outconn.targets[i];
@@ -431,20 +468,22 @@ static void apply_stdp_on_pre(int pre, int t_pre)
 static void apply_stdp_on_post(int post, int t_post)
 {
     /* For each excitatory neuron pre, check its outgoing connections for post */
-    for (int pre = 0; pre < NE; pre++) {
-        int K = CE;
-        for (int j = 0; j < K; j++) {
-            if (neurons[pre].outconn.targets[j] != post)
-                continue;
-            int t_pre = neurons[pre].last_spike_time;
-            if (t_pre <= -100000)
-                continue;
-            int dt = t_post - t_pre; /* positive if post after pre => potentiation */
-            if (dt > 0 && dt < 1000) {
-                float dw = A_plus * expf(- (float)dt / TAU_PLUS);
-                neurons[pre].outconn.weights[j] += dw;
-                /* clamp */
-                neurons[pre].outconn.weights[j] = clampf(neurons[pre].outconn.weights[j], W_MIN, W_MAX);
+    for (int pre = 0; pre < N; pre++) {
+        if (neurons[pre].is_exc) {
+            int K = CE;
+            for (int j = 0; j < K; j++) {
+                if (neurons[pre].outconn.targets[j] != post)
+                    continue;
+                int t_pre = neurons[pre].last_spike_time;
+                if (t_pre <= -100000)
+                    continue;
+                int dt = t_post - t_pre; /* positive if post after pre => potentiation */
+                if (dt > 0 && dt < 1000) {
+                    float dw = A_plus * expf(- (float)dt / TAU_PLUS);
+                    neurons[pre].outconn.weights[j] += dw;
+                    /* clamp */
+                    neurons[pre].outconn.weights[j] = clampf(neurons[pre].outconn.weights[j], W_MIN, W_MAX);
+                }
             }
         }
     }
@@ -484,9 +523,10 @@ static void sim_step(void)
     bucket_clear(db);
 
     /* 2) External noisy input: Poisson-like drive to excitatory neurons */
-    for (int i = 0; i < NE; i++) {
-        if (frandf() < 0.01f)
-            I[i] += 24.0f * frandf();
+    for (int i = 0; i < N; i++) {
+        if (neurons[i].is_exc)
+            if (frandf() < 0.01f)
+                I[i] += 24.0f * frandf();
     }
 
     int num_steps = 2;
@@ -509,7 +549,7 @@ static void sim_step(void)
                 neurons[i].v = neurons[i].c;
                 neurons[i].u += neurons[i].d;
                 /* schedule deliveries to targets according to their delays */
-                int K = (i < NE) ? CE : CI;
+                int K = neurons[i].is_exc ? CE : CI;
                 for (int j = 0; j < K; j++) {
                     schedule_spike_delivery(i, j);
                 }
@@ -537,10 +577,12 @@ static float mean_exc_weight(void)
 {
     double s = 0.0;
     long cnt = 0;
-    for (int i = 0; i < NE; i++) {
-        for (int j = 0; j < CE; j++) {
-            s += neurons[i].outconn.weights[j];
-            cnt++;
+    for (int i = 0; i < N; i++) {
+        if (neurons[i].is_exc) {
+            for (int j = 0; j < CE; j++) {
+                s += neurons[i].outconn.weights[j];
+                cnt++;
+            }
         }
     }
     if (cnt == 0)
@@ -628,8 +670,8 @@ static void draw_selected_trace(int sx, int sy, int sw, int sh)
         float x = sx + 1 + ((float)k / (float)(VUBUF_LEN_MS-1) * (float)(sw-2));
         float vy = sy + 1 + 10 + ((1.0f - vnorm) * (sh - 20));
         float uy = sy + 1 + 10 + ((1.0f - unorm) * (sh - 20));
-        Color vC = selected_neuron < NE ? GREEN : DARKGREEN;
-        Color uC = selected_neuron < NE ? SKYBLUE : BLUE;
+        Color vC = neurons[selected_neuron].is_exc ? GREEN : DARKGREEN;
+        Color uC = neurons[selected_neuron].is_exc ? SKYBLUE : BLUE;
         if (k > 0) {
             DrawLine(vpx_prev, vpy_prev, x, vy, vC);
             DrawLine(upx_prev, upy_prev, x, uy, uC);
@@ -915,13 +957,13 @@ int main(void)
                             continue;
                         float x = rx + map((float)nid, 0.0, (float)N, 0.0, rw);
                         float y = ry + ((float)(ft - display_start) / window_ms) * rh;
-                        Color pc = (nid < NE) ? GREEN : DARKGREEN;
+                        Color pc = neurons[nid].is_exc ? GREEN : DARKGREEN;
                         pc.a = 150;
                         DrawRectangle((int)x-1, (int)y-1, 2, 2, pc);
                         if (nid == selected_neuron)
                             DrawCircle((int)x, (int)y, 3, YELLOW);
                         if ((ft < t_ms) && (ft > t_ms - 10)) {
-                            if (nid < NE) {
+                            if (neurons[nid].is_exc ) {
                                 DrawCircle((int)x, (int)y, 3, WHITE);
                             } else {
                                 DrawCircle((int)x, (int)y, 3, RED);
@@ -954,7 +996,7 @@ int main(void)
                             norm = 1;
                         int x = vx + (int)((float)idx / (float)M * vw);
                         int y = vy + 20 + (int)((1.0f - norm) * (vh - 40));
-                        Color col = (i < NE) ? GREEN: DARKGREEN;
+                        Color col = neurons[i].is_exc ? GREEN: DARKGREEN;
                         DrawRectangle(x-1, y-1, 2, 2, col);
                         if (i == selected_neuron)
                             DrawCircle(x, y, 3, YELLOW);
