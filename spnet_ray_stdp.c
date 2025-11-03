@@ -55,11 +55,11 @@ ColourEntry *palette = NULL;
 #define HEIGHT 700
 
 /* Network params */
-#define NE 800
-#define NI 200
-#define N (NE+NI)
+//#define NE 800
+//#define NI 200
+//#define N (NE+NI)
 
-#define CE 100  /* excitatory outgoing per neuron */
+#define CE 75  /* excitatory outgoing per neuron */
 #define CI 25   /* inhibitory outgoing per neuron */
 
 #define MAX_DELAY 20 /* ms */
@@ -312,7 +312,7 @@ static void bucket_clear(DelayBucket *db)
     db->count = 0;
 }
 
-int* array_permute(int *arr)
+int* array_permute(int *arr, int N)
 {
     if (arr == NULL || arrlen(arr) == 0) {
         arrsetlen(arr, N);
@@ -328,55 +328,65 @@ int* array_permute(int *arr)
     return arr;
 }
 
-int factors(long long n, long long *a, long long *b)
+typedef struct
 {
-    double R = 16.0/9.0 ;
+    long long rows;
+    long long cols;
+} gridFactors;
 
-    if (n <= 0) {
+gridFactors factors(long long num, double R)
+{
+    gridFactors ret = {0};
+
+    if (num <= 0) {
         fprintf(stderr, "N deve essere positivo\n");
-        return 1;
+        return ret;
     }
 
     double best_diff = INFINITY;
     // Primo pass: trovare la differenza minima assoluta |(double)a/b - R|
-    for (long long a = 1; a * a <= n; ++a) {
-        if (n % a == 0) {
-            long long b = n / a;
-            double ratio1 = (double)a / (double)b;
+    for (long long col = 1; col * col <= num; ++col) {
+        if (num % col == 0) {
+            long long row = num / col;
+            double ratio1 = (double)col / (double)row;
             double diff1 = fabs(ratio1 - R);
-            if (diff1 < best_diff) best_diff = diff1;
+            if (diff1 < best_diff)
+                best_diff = diff1;
 
             // considerare anche la coppia invertita se diversa
-            if (a != b) {
-                double ratio2 = (double)b / (double)a;
+            if (col != row) {
+                double ratio2 = (double)row / (double)col;
                 double diff2 = fabs(ratio2 - R);
-                if (diff2 < best_diff) best_diff = diff2;
+                if (diff2 < best_diff)
+                    best_diff = diff2;
             }
         }
     }
 
     // Seconda pass: stampare tutte le coppie che raggiungono best_diff (tolleranza per fp)
     const double eps = 1e-12;
-    printf("Fattori di %lld con rapporto vicino a %.12g (diff minima = %.12g):\n", n, R, best_diff);
-    for (long long a = 1; a * a <= n; ++a) {
-        if (n % a == 0) {
-            long long b = n / a;
-            double ratio1 = (double)a / (double)b;
+    printf("Fattori di %lld con rapporto vicino a %.12g (diff minima = %.12g):\n", num, R, best_diff);
+    for (long long col = 1; col * col <= num; ++col) {
+        if (num % col == 0) {
+            long long row = num / col;
+            double ratio1 = (double)col / (double)row;
             double diff1 = fabs(ratio1 - R);
             if (fabs(diff1 - best_diff) <= eps) {
-                printf("%lld x %lld  -> rapporto = %.12g\n", a, b, ratio1);
+                printf("%lld x %lld  -> rapporto = %.12g\n", col, row, ratio1);
             }
-            if (a != b) {
-                double ratio2 = (double)b / (double)a;
+            if (col != row) {
+                double ratio2 = (double)row / (double)col;
                 double diff2 = fabs(ratio2 - R);
                 if (fabs(diff2 - best_diff) <= eps) {
-                    printf("%lld x %lld  -> rapporto = %.12g\n", b, a, ratio2);
+                    printf("%lld x %lld  -> rapporto = %.12g\n", row, col, ratio2);
                 }
             }
+            ret.cols = row;
+            ret.rows = col;
         }
     }
 
-    return 0;
+    return ret;
 }
 
 /* Initialize network (connections, weights, delays, v/u, buffers) */
@@ -390,25 +400,27 @@ static void init_network(Grid *grid)
      * crea un array di N zeri, imposta NE posizioni a 1 senza
      * ripetizione (Fisher–Yates)*/
     /* flags: 1 = eccitatorio, 0 = inibitorio */
-    uint8_t *flags = (uint8_t*)calloc(N, sizeof(uint8_t));
-    int *pool = (int*)malloc(N * sizeof(int));
-    for (int i = 0; i < N; ++i)
+    float nei_ratio = 3.0 / 4.0; // exc to inh ratio
+    int NE = grid->numCells * nei_ratio; // number of exc neurons
+    uint8_t *flags = (uint8_t*)calloc(grid->numCells, sizeof(uint8_t));
+    int *pool = (int*)malloc(grid->numCells * sizeof(int));
+    for (int i = 0; i < grid->numCells; ++i)
         pool[i] = i;
     for (int k = 0; k < NE; ++k) {
-        int r = rand() % (N - k);
+        int r = rand() % (grid->numCells - k);
         flags[pool[r]] = 1;
-        pool[r] = pool[N - k - 1]; /* rimosso dallo pool */
+        pool[r] = pool[grid->numCells - k - 1]; /* rimosso dallo pool */
     }
     free(pool);
 
-    arrsetlen(neurons, N);
+    arrsetlen(neurons, grid->numCells);
     /* allocate */
     firing_times = (int*)malloc(firing_cap * 2 * sizeof(int));
 
     cell_activity = (float*)calloc(grid->numCells, sizeof(float));
 
     /* init neurons usando flags[i] */
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < grid->numCells; i++) {
         float ra = 0.0f;
         float ra2 = 0.0f;
 
@@ -433,7 +445,7 @@ static void init_network(Grid *grid)
     }
 
     /* init connections usando neurons[i].is_exc */
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < grid->numCells; i++) {
         int K = neurons[i].is_exc ? CE : CI;
         CellPos *selected = NULL;
         arrsetlen(selected, neurons[i].is_exc ? CE : CI);
@@ -473,11 +485,11 @@ static void init_network(Grid *grid)
 }
 
 /* Free network memory */
-static void free_network(void)
+static void free_network(Grid *grid)
 {
     if (!neurons)
         return;
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < grid->numCells; i++) {
         arrfree(neurons[i].outconn.targets);
         arrfree(neurons[i].outconn.weights);
         arrfree(neurons[i].outconn.delay);
@@ -541,10 +553,10 @@ static void apply_stdp_on_pre(int pre, int t_pre)
    We don't store incoming lists for memory reasons, so iterate all excitatory neurons and check if they connect to 'post' - costly but acceptable for moderate CE/NE.
    Optimization: only check outgoing from excitatory population.
 */
-static void apply_stdp_on_post(int post, int t_post)
+static void apply_stdp_on_post(Grid *grid, int post, int t_post)
 {
     /* For each excitatory neuron pre, check its outgoing connections for post */
-    for (int pre = 0; pre < N; pre++) {
+    for (int pre = 0; pre < grid->numCells; pre++) {
         if (neurons[pre].is_exc) {
             int K = CE;
             for (int j = 0; j < K; j++) {
@@ -581,13 +593,14 @@ static void schedule_spike_delivery(int pre, int conn_index)
 }
 
 /* Simulation single step (1 ms) */
-static void sim_step(void)
+static void sim_step(Grid *grid)
 {
     /* 1) Deliver all events in the current bucket (arrivals scheduled for this ms) */
     DelayBucket *db = &delaybuckets[current_delay_index];
     /* produce an input array I for this ms */
-    static float I[N];
-    for (int i = 0; i < N; i++)
+    static float *I = NULL;
+    arrsetlen(I, grid->numCells);
+    for (int i = 0; i < grid->numCells; i++)
         I[i] = 0.0f;
 
     for (int k = 0; k < db->count; k++) {
@@ -599,7 +612,7 @@ static void sim_step(void)
     bucket_clear(db);
 
     /* 2) External noisy input: Poisson-like drive to excitatory neurons */
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < grid->numCells; i++) {
         if (neurons[i].is_exc)
             if (frandf() < 0.01f)
                 I[i] += 24.0f * frandf();
@@ -608,14 +621,14 @@ static void sim_step(void)
     int num_steps = 2;
     for (int step = 0; step < num_steps; ++step) {
         /* 3) Integrate neuron dynamics (Izhikevich) */
-        for (int i = 0; i < N; i++) {
+        for (int i = 0; i < grid->numCells; i++) {
             float dv = 0.04f * neurons[i].v * neurons[i].v + 5.0f * neurons[i].v + 140.0f - neurons[i].u + I[i];
             neurons[i].v += dv * (DT / (float)num_steps);
             neurons[i].u += neurons[i].a * (neurons[i].b * neurons[i].v - neurons[i].u) * (DT / (float)num_steps);
         }
 
         /* 4) Check for spikes (v >= 30) */
-        for (int i = 0; i < N; i++) {
+        for (int i = 0; i < grid->numCells; i++) {
             if (neurons[i].v >= 30.0f) {
                 /* record spike */
                 add_firing_record(t_ms, i);
@@ -630,7 +643,7 @@ static void sim_step(void)
                     schedule_spike_delivery(i, j);
                 }
                 /* STDP: handle post-spike LTP for incoming excitatory synapses */
-                apply_stdp_on_post(i, t_ms);
+                apply_stdp_on_post(grid, i, t_ms);
                 /* update last spike time */
                 neurons[i].last_spike_time = t_ms;
             }
@@ -642,18 +655,20 @@ static void sim_step(void)
     t_ms += DT;
     vhist_idx = (vhist_idx + 1) % VUBUF_LEN_MS;
     uhist_idx = (uhist_idx + 1) % VUBUF_LEN_MS;
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < grid->numCells; i++) {
         neurons[i].v_hist[vhist_idx] = neurons[i].v;
         neurons[i].u_hist[uhist_idx] = neurons[i].u;
     }
+
+    arrfree(I);
 }
 
 /* compute mean excitatory weight */
-static float mean_exc_weight(void)
+static float mean_exc_weight(Grid *grid)
 {
     double s = 0.0;
     long cnt = 0;
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < grid->numCells; i++) {
         if (neurons[i].is_exc) {
             for (int j = 0; j < CE; j++) {
                 s += neurons[i].outconn.weights[j];
@@ -667,7 +682,7 @@ static float mean_exc_weight(void)
 }
 
 /* Find neuron by clicking raster: map x,y to time and neuron id */
-static int neuron_from_raster_click(int click_x, int click_y, int rx, int ry, int rw, int rh)
+static int neuron_from_raster_click(Grid *grid, int click_x, int click_y, int rx, int ry, int rw, int rh)
 {
     /* If click outside raster area return -1 */
     if (click_x < rx || click_x > rx+rw || click_y < ry || click_y > ry+rh)
@@ -676,12 +691,12 @@ static int neuron_from_raster_click(int click_x, int click_y, int rx, int ry, in
     int rely = click_y - ry;
     if (rely < 24) /* header area */
         return -1;
-    int nid = -rx + map(click_x, 0.0, rw, 0.0, (float)N);
+    int nid = -rx + map(click_x, 0.0, rw, 0.0, (float)grid->numCells);
     /* excitatory map */
     if (nid < 0)
         nid = 0;
-    if (nid >= N)
-        nid = N-1;
+    if (nid >= grid->numCells)
+        nid = grid->numCells-1;
     return nid;
 }
 
@@ -701,7 +716,7 @@ static int neuron_from_grid_click(Grid *grid, int click_x, int click_y, int rx, 
     int nid = nidy * grid->numCols + nidx;
 
     if (nid < 0) nid = 0;
-    if (nid >= N) nid = N-1;
+    if (nid >= grid->numCells) nid = grid->numCells-1;
 
     return nid;
 }
@@ -765,7 +780,7 @@ void compute_cell_activity(Grid *grid)
         cell_activity[k] = 0.0f;
 
     // accumulate contributions per neuron into its cell
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < grid->numCells; i++) {
         int cell = i;
         // metric: weighted sum of receptor conductances and depolarization
         float metric = 0.0f;
@@ -824,18 +839,18 @@ int main(void)
 {
     srand((unsigned)time(NULL));
 
-    int nc = 40;
-    int nr = 25;
-    int gw = (WIDTH - 2*MARGIN);
-    int gh = (HEIGHT - 2*MARGIN);
+    int grid_width = (WIDTH - 2*MARGIN);
+    int grid_height = (HEIGHT - 2*MARGIN);
+    int num_cells = 100000;
+    gridFactors gf = factors(num_cells, (double)grid_width/(double)grid_height);;
     Grid grid = {
-            .numCols = nc,
-            .numRows = nr,
-            .numCells = (nc*nr),
-            .width = gw,
-            .height = gh,
-            .cellWidth = ((float)gw / (float)nc),
-            .cellHeight = ((float)gh / (float)nr)
+            .numCols = gf.cols,
+            .numRows = gf.rows,
+            .numCells = (gf.cols*gf.rows),
+            .width = grid_width,
+            .height = grid_height,
+            .cellWidth = ((float)grid_width / (float)gf.cols),
+            .cellHeight = ((float)grid_height / (float)gf.rows)
     };
 
     Palette_init(&palette, STOCK_COLDHOT3);
@@ -894,7 +909,7 @@ int main(void)
         if (IsKeyPressed(KEY_DOWN))
             steps_per_frame = Clamp(steps_per_frame-1, 1, 5000);
         if (IsKeyPressed(KEY_R)) {
-            free_network();
+            free_network(&grid);
             init_network(&grid);
         }
         if (IsKeyPressed(KEY_LEFT) && !IsKeyDown(KEY_LEFT_SHIFT)) {
@@ -927,7 +942,7 @@ int main(void)
                 int rw = WIDTH - 2*MARGIN;
                 int rh = RASTER_H;
 
-                int nid = neuron_from_raster_click(mx, my, rx, ry, rw, rh);
+                int nid = neuron_from_raster_click(&grid, mx, my, rx, ry, rw, rh);
                 selected_neuron = (nid >= 0) ? nid : -1;
             }
             if (graphics_grid) {
@@ -956,7 +971,7 @@ int main(void)
         /* simulate */
         if (!paused)
             for (int s = 0; s < steps_per_frame; s++)
-                sim_step();
+                sim_step(&grid);
 
         /* draw */
         BeginDrawing(); {
@@ -969,7 +984,7 @@ int main(void)
                     show_grid(&grid);
 
 //                    // evidenzia celle disponibili nell'anello (trasparente)
-//                    for (int ni = 0; ni < N; ++ni) {
+//                    for (int ni = 0; ni < grid->numCells; ++ni) {
 //                        CellPos cell_rc = {0};
 //                        cell_rc = index_to_cellpos(ni, &cell_rc.r, &cell_rc.c);
 //                        if (in_annulus(cell_rc.r, cell_rc.c, center_r, center_c, rmin, rmax)) {
@@ -1046,7 +1061,7 @@ int main(void)
                         int nid = firing_times[i*2 + 1];    // neuron id
                         if (ft < display_start)
                             continue;
-                        float x = rx + map((float)nid, 0.0, (float)N, 0.0, rw);
+                        float x = rx + map((float)nid, 0.0, (float)grid.numCells, 0.0, rw);
                         float y = ry + ((float)(ft - display_start) / window_ms) * rh;
                         Color pc = neurons[nid].is_exc ? GREEN : DARKGREEN;
                         pc.a = 150;
@@ -1071,14 +1086,14 @@ int main(void)
                     DrawText("v snapshot (sampled neurons)", vx+6, vy+6, 14, LIGHTGRAY);
 
                     /* sample M neurons across population */
-                    int M = N; //300;
-                    if (M > N)
-                        M = N;
-                    int step = N / M;
+                    int M = grid.numCells; //300;
+                    if (M > grid.numCells)
+                        M = grid.numCells;
+                    int step = grid.numCells / M;
                     if (step < 1)
                         step = 1;
                     int idx = 0;
-                    for (int i = 0; i < N && idx < M; i += step, idx++) {
+                    for (int i = 0; i < grid.numCells && idx < M; i += step, idx++) {
                         float vv = neurons[i].v;
                         float norm = (vv + 100.0f) / 140.0f;
                         if (norm < 0)
@@ -1098,7 +1113,7 @@ int main(void)
                     int pw = WIDTH - 2*MARGIN;
                     int ph = PANEL_H;
                     DrawRectangleLines(px-1, py-1, pw+2, ph+2, LIGHTGRAY);
-                    float mw = mean_exc_weight();
+                    float mw = mean_exc_weight(&grid);
                     char info[256];
                     snprintf(info, sizeof(info), "t=%d ms  mean_exc_weight=%.3f  steps/frame=%d  %s", t_ms, mw, steps_per_frame, paused ? "PAUSED" : "RUN");
                     DrawText(info, px+6, py+6, 14, WHITE);
@@ -1131,7 +1146,7 @@ int main(void)
 
             int px = MARGIN;
             int py = vy + vh + MARGIN;
-            float mw = mean_exc_weight();
+            float mw = mean_exc_weight(&grid);
             char info[256];
             snprintf(info, sizeof(info), "t=%d ms  mean_exc_weight=%.3f  steps/frame=%d  %s", t_ms, mw, steps_per_frame, paused ? "PAUSED" : "RUN");
             DrawText(info, px+6, py+6, 14, WHITE);
@@ -1144,7 +1159,7 @@ int main(void)
         } EndDrawing();
     }
 
-    free_network();
+    free_network(&grid);
     free(selected);
     arrfree(palette);
 
