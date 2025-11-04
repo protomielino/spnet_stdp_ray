@@ -80,8 +80,8 @@ typedef struct
     int numCells; // this number needs to be == N == NE+NI
     int width; // pixel
     int height; // pixel
-    int cellWidth; // pixel
-    int cellHeight; // pixel
+    float cellWidth; // pixel
+    float cellHeight; // pixel
 } Grid;
 
 //static int GRID_COLS;
@@ -263,13 +263,13 @@ static inline CellPos grid_index_to_cellpos(Grid *grid, int idx, int *r, int *c)
     *c = idx % grid->numCols;
     return (CellPos){ *r, *c };
 }
-static inline int grid_cellpos_to_index(Grid *grid, int r, int c)
+static inline int grid_cellpos_to_index(Grid *grid, CellPos cell)
 {
-    if (r < 0)
-        r = (r % grid->numRows + grid->numRows) % grid->numRows;
-    if (c < 0)
-        c = (c % grid->numCols + grid->numCols) % grid->numCols;
-    return r * grid->numCols + c;
+    if (cell.r < 0)
+        cell.r = (cell.r % grid->numRows + grid->numRows) % grid->numRows;
+    if (cell.c < 0)
+        cell.c = (cell.c % grid->numCols + grid->numCols) % grid->numCols;
+    return cell.r * grid->numCols + cell.c;
 }
 /* helper: convert row,col -> x,y (cell's top left+MARGIN) */
 static inline Vector2 grid_cellpos_to_vec2(Grid *grid, CellPos cp)
@@ -475,7 +475,8 @@ static void init_network(Grid *grid)
         neurons[i].outconn.weights = NULL;
         neurons[i].outconn.delay = NULL;
         for (int j = 0; j < K; j++) {
-            arrput(neurons[i].outconn.targets, grid_cellpos_to_index(grid, selected[j].r, selected[j].c));
+            CellPos c = {selected[j].r, selected[j].c};
+            arrput(neurons[i].outconn.targets, grid_cellpos_to_index(grid, c));
             if (neurons[i].is_exc) {
                 /* excitatory initial weight random around 6.0 +- */
                 arrput(neurons[i].outconn.weights, 6.0f * frandf());
@@ -711,24 +712,28 @@ static int neuron_from_raster_click(Grid *grid, int click_x, int click_y, int rx
 }
 
 /* Find neuron by clicking raster: map x,y to time and neuron id */
-static int neuron_from_grid_click(Grid *grid, int click_x, int click_y, int rx, int ry, int rw, int rh)
+static int cell_index_from_grid_click(Grid *grid, int click_x, int click_y, int rx, int ry, int rw, int rh)
 {
-    int rel_x = click_x - MARGIN;
-    int rel_y = click_y - MARGIN;
+    int rel_x = click_x - rx;
+    int rel_y = click_y - ry;
 
     /* If click outside grid area return -1 */
-    if (click_x < rx || click_x > rx+rw || click_y < ry || click_y > ry+rh)
+    if (click_x <= rx || click_x >= rx+rw || click_y <= ry || click_y >= ry+rh)
         return -1;
 
-    int nidx = map(rel_x, 0, grid->width, 0, grid->numCols);
-    int nidy = map(rel_y, 0, grid->height, 0, grid->numRows);;
+    CellPos cell = {
+            map(rel_y, 0, grid->height, 0, grid->numRows),
+            map(rel_x, 0, grid->width,  0, grid->numCols)
+    };
 
-    int nid = nidy * grid->numCols + nidx;
+    int cell_idx = cell.r * grid->numCols + cell.c;
 
-    if (nid < 0) nid = 0;
-    if (nid >= grid->numCells) nid = grid->numCells-1;
+    if (cell_idx < 0)
+        cell_idx = 0;
+    if (cell_idx >= grid->numCells)
+        cell_idx = grid->numCells-1;
 
-    return nid;
+    return cell_idx;
 }
 
 bool graphics_raster = true;
@@ -745,7 +750,7 @@ static void draw_selected_trace(int sx, int sy, int sw, int sh)
     snprintf(buf, sizeof(buf), "Neuron %d  v,u(t) last %d ms", selected_neuron, VUBUF_LEN_MS);
     DrawText(buf, sx+10, sy+10, 14, LIGHTGRAY);
 
-    /* draw axes */
+    /* draw outline */
     DrawRectangleLines(sx, sy, sw, sh, LIGHTGRAY);
 
     /* find time window: show last VUBUF_LEN_MS ms */
@@ -816,16 +821,17 @@ void compute_cell_activity(Grid *grid)
     }
 }
 
-void show_grid(Grid *grid)
+void grid_show(Grid *grid)
 {
     DrawRectangleLines(MARGIN, MARGIN, grid->width, grid->height, WHITE);
+
     for (int r = 0; r < grid->numRows; r++) {
         for (int c = 0; c < grid->numCols; c++) {
-            int idx = r*grid->numCols + c;
+            int idx = grid_cellpos_to_index(grid, (CellPos){r, c});
             float val = neurons[idx].cell_activity;
             Color col = Palette_Sample(&palette, val);
-            int x = MARGIN + c * grid->cellWidth;
-            int y = MARGIN + r * grid->cellHeight;
+            int x = MARGIN + (float)c * (float)grid->cellWidth;
+            int y = MARGIN + (float)r * (float)grid->cellHeight;
             DrawRectangle(x+1, y+1, grid->cellWidth - 1, grid->cellHeight - 1, col);
             if (idx == selected_neuron) {
                 DrawRectangleLines(x, y, grid->cellWidth, grid->cellHeight, MAGENTA);
@@ -850,7 +856,7 @@ int main(void)
 
     int grid_width = (WIDTH - 2*MARGIN);
     int grid_height = (HEIGHT - 2*MARGIN);
-    int num_cells = 1000;
+    int num_cells = 2000;
     gridFactors gf = factors(num_cells, (double)grid_width/(double)grid_height);;
     Grid grid = {
             .numCols = gf.cols,
@@ -961,7 +967,7 @@ int main(void)
                 int rw = grid.width;
                 int rh = grid.height;
 
-                int nid = neuron_from_grid_click(&grid, mx, my, rx, ry, rw, rh);
+                int nid = cell_index_from_grid_click(&grid, mx, my, rx, ry, rw, rh);
                 selected_neuron = (nid >= 0) ? nid : -1;
 
                 // imposta il centro cliccando sulla griglia
@@ -990,7 +996,7 @@ int main(void)
                     // compute activities for visualization
                     compute_cell_activity(&grid);
 
-                    show_grid(&grid);
+                    grid_show(&grid);
 
 //                    // evidenzia celle disponibili nell'anello (trasparente)
 //                    for (int ni = 0; ni < grid->numCells; ++ni) {
@@ -1018,14 +1024,13 @@ int main(void)
                         int sw;
                         int sh = SELECT_TRACE_H-10;
                         if (mx < WIDTH/2) {
-                            sx = mx + MARGIN/2;
-                            sw = WIDTH - mx - 2*MARGIN;
+                            sx = mx + MARGIN;
+                            sw = WIDTH - 2*MARGIN - mx;
                         } else {
                             sx = MARGIN;
-                            sw = mx - MARGIN - MARGIN/2;
+                            sw = mx - 2*MARGIN;
                         }
 
-                        DrawRectangleLines(sx-1, sy-1, sw+2, sh+2, LIGHTGRAY);
                         draw_selected_trace(sx, sy, sw, sh);
                     }
 
