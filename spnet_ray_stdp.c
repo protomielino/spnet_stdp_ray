@@ -73,9 +73,6 @@ ColourEntry *palette = NULL;
 #define PANEL_H 50
 #define SELECT_TRACE_H 100
 
-// Parametri visualization configurabili
-static float *cell_activity;
-
 typedef struct
 {
     int numCols;
@@ -158,26 +155,29 @@ int grid_in_annulus(Grid *grid, int r, int c, int rc, int cc, int rmin, int rmax
 int grid_pick_random_cells_in_annulus(Grid *grid, int rc, int cc, int rmin, int rmax, int k, CellPos *out)
 {
     // Raccogli tutte le celle ammissibili
-    CellPos *candidates = (CellPos*)malloc(grid->numRows * grid->numCols * sizeof(CellPos));
+    CellPos *candidates = NULL;
     int cnt = 0;
     for (int r = 0; r < grid->numRows; r++) {
         for (int c = 0; c < grid->numCols; c++) {
             if (grid_in_annulus(grid, r, c, rc, cc, rmin, rmax)) {
-                candidates[cnt].r = r;
-                candidates[cnt].c = c;
-                cnt++;
+                CellPos cand = {r, c};
+                arrput(candidates, cand);
             }
         }
     }
+    cnt = arrlen(candidates);
     if (cnt == 0) {
-        free(candidates); candidates = NULL;
+        arrfree(candidates);
+        candidates = NULL;
         return 0;
     }
 
     // Se k >= cnt prendiamo tutti
     if (k >= cnt) {
-        for (int i = 0; i < cnt; i++) out[i] = candidates[i];
-        free(candidates); candidates = NULL;
+        for (int i = 0; i < cnt; i++)
+            out[i] = candidates[i];
+        arrfree(candidates);
+        candidates = NULL;
         return cnt;
     }
 
@@ -191,7 +191,9 @@ int grid_pick_random_cells_in_annulus(Grid *grid, int rc, int cc, int rmin, int 
         out[i] = candidates[i];
     }
 
-    free(candidates); candidates = NULL;
+    arrfree(candidates);
+    candidates = NULL;
+
     return k;
 }
 
@@ -206,11 +208,17 @@ int grid_pick_random_cells_in_annulus(Grid *grid, int rc, int cc, int rmin, int 
 #define W_MIN 0.0f
 #define W_MAX 10.0f
 
+typedef struct
+{
+    int neuron;
+    int time_ms;
+} FiringTime;
+
 /* Globals */
-static IzkNeuron *neurons;
-static DelayBucket delaybuckets[MAX_DELAY+1];   /* index 1..MAX_DELAY used; 0 unused */
-static int current_delay_index = 0;             /* rotates every ms */
-static int *firing_times;                         /* circular buffer of pairs (time, neuron) */
+static IzkNeuron *neurons = NULL;
+static DelayBucket *delaybuckets = NULL;    /* index 1..MAX_DELAY used; 0 unused */
+static int current_delay_index = 0;         /* rotates every ms */
+static FiringTime *firing_times = NULL;            /* circular buffer of pairs (time, neuron) */
 static int firing_count = 0;
 static int firing_cap = FIRING_BUF;
 
@@ -275,6 +283,11 @@ static inline Vector2 grid_cellpos_to_vec2(Grid *grid, CellPos cp)
 /* Initialize delay buckets */
 static void init_delay_buckets(void)
 {
+    if (arrlen(delaybuckets) != 0) {
+        arrfree(delaybuckets);
+    }
+    delaybuckets = NULL;
+    arrsetlen(delaybuckets, MAX_DELAY+1);
     for (int d = 0; d <= MAX_DELAY; d++) {
         delaybuckets[d].neuron = NULL;
         delaybuckets[d].weight = NULL;
@@ -292,8 +305,8 @@ static void ensure_bucket_cap(DelayBucket *db, int need)
     int newcap = db->cap>0 ? db->cap*2 : 64;
     while (newcap < need)
         newcap *= 2;
-    db->neuron = (int*)realloc(db->neuron, newcap * sizeof(int));
-    db->weight = (float*)realloc(db->weight, newcap * sizeof(float));
+    arrsetlen(db->neuron, newcap);
+    arrsetlen(db->weight, newcap);
     db->cap = newcap;
 }
 
@@ -400,24 +413,27 @@ static void init_network(Grid *grid)
      * crea un array di N zeri, imposta NE posizioni a 1 senza
      * ripetizione (Fisher–Yates)*/
     /* flags: 1 = eccitatorio, 0 = inibitorio */
-    float nei_ratio = 3.0 / 4.0; // exc to inh ratio
-    int NE = grid->numCells * nei_ratio; // number of exc neurons
+    float exc_to_inh_ratio = 3.0 / 4.0; // exc to inh ratio
+    int num_exc = grid->numCells * exc_to_inh_ratio; // number of exc neurons
+
     uint8_t *flags = (uint8_t*)calloc(grid->numCells, sizeof(uint8_t));
     int *pool = (int*)malloc(grid->numCells * sizeof(int));
     for (int i = 0; i < grid->numCells; ++i)
         pool[i] = i;
-    for (int k = 0; k < NE; ++k) {
+    for (int k = 0; k < num_exc; ++k) {
         int r = rand() % (grid->numCells - k);
         flags[pool[r]] = 1;
         pool[r] = pool[grid->numCells - k - 1]; /* rimosso dallo pool */
     }
     free(pool);
 
-    arrsetlen(neurons, grid->numCells);
     /* allocate */
-    firing_times = (int*)malloc(firing_cap * 2 * sizeof(int));
+    arrsetlen(neurons, grid->numCells);
+    arrsetlen(firing_times, firing_cap);
 
-    cell_activity = (float*)calloc(grid->numCells, sizeof(float));
+    for (int i = 0; i < grid->numCells; i++) {
+        neurons[i].cell_activity = 0.0f;
+    }
 
     /* init neurons usando flags[i] */
     for (int i = 0; i < grid->numCells; i++) {
@@ -471,6 +487,8 @@ static void init_network(Grid *grid)
                 arrput(neurons[i].outconn.delay, 1); /* inhibitory delay 1 ms */
             }
         }
+
+        arrfree(selected);
     }
 
     init_delay_buckets();
@@ -492,14 +510,13 @@ static void free_network(Grid *grid)
         arrfree(neurons[i].outconn.weights);
         arrfree(neurons[i].outconn.delay);
     }
-    arrfree(neurons);
-    free(firing_times);
+    arrfree(firing_times);
     for (int d = 0; d <= MAX_DELAY; d++) {
-        free(delaybuckets[d].neuron);
-        free(delaybuckets[d].weight);
+        arrfree(delaybuckets[d].neuron);
+        arrfree(delaybuckets[d].weight);
     }
-
-    free(cell_activity);
+    arrfree(delaybuckets);
+    arrfree(neurons);
 }
 
 /* Add firing to circular buffer of pairs (time, neuron) */
@@ -508,12 +525,11 @@ static void add_firing_record(int time_ms, int neuron)
     if (firing_count >= firing_cap) {
         /* simple downsample: shift keep half */
         int keep = firing_cap / 2;
-        int start = (firing_count - keep) * 2;
-        memmove(firing_times, firing_times + start, keep * 2 * sizeof(int));
+        int start = (firing_count - keep);
+        memmove(firing_times, firing_times + start, keep * sizeof(int));
         firing_count = keep;
     }
-    firing_times[firing_count*2 + 0] = time_ms;
-    firing_times[firing_count*2 + 1] = neuron;
+    firing_times[firing_count] = (FiringTime){ neuron, time_ms };
     firing_count++;
 }
 
@@ -771,11 +787,10 @@ void compute_cell_activity(Grid *grid)
 {
     // zero
     for (int k = 0; k < grid->numCells; k++)
-        cell_activity[k] = 0.0f;
+        neurons[k].cell_activity = 0.0f;
 
     // accumulate contributions per neuron into its cell
-    for (int i = 0; i < grid->numCells; i++) {
-        int cell = i;
+    for (int cell = 0; cell < grid->numCells; cell++) {
         // metric: weighted sum of receptor conductances and depolarization
         float metric = 0.0f;
 //        if (disp_ampa)
@@ -786,18 +801,18 @@ void compute_cell_activity(Grid *grid)
 //            metric += fabsf(syn[i].g_gabaa);
 //        if (disp_gabab)
 //            metric += 0.5f * fabsf(syn[i].g_gabab);
-        float vdep = neurons[i].v + 65.0f;
+        float vdep = neurons[cell].v + 65.0f;
         if (vdep > 0.0f)
             metric += 0.02f * vdep;
-        cell_activity[cell] += metric;
+        neurons[cell].cell_activity += metric;
     }
     // normalize
     for (int k = 0; k < grid->numCells; k++) {
         // normalization scale empirical
-        float val = cell_activity[k]; // TESTING / 20.0f;
+        float val = neurons[k].cell_activity; // TESTING / 20.0f;
         if (val > 1.0f)
             val = 1.0f;
-        cell_activity[k] = val;
+        neurons[k].cell_activity = val;
     }
 }
 
@@ -807,7 +822,7 @@ void show_grid(Grid *grid)
     for (int r = 0; r < grid->numRows; r++) {
         for (int c = 0; c < grid->numCols; c++) {
             int idx = r*grid->numCols + c;
-            float val = cell_activity[idx];
+            float val = neurons[idx].cell_activity;
             Color col = Palette_Sample(&palette, val);
             int x = MARGIN + c * grid->cellWidth;
             int y = MARGIN + r * grid->cellHeight;
@@ -1051,8 +1066,8 @@ int main(void)
                     if (display_start < 0)
                         display_start = 0;
                     for (int i = 0; i < firing_count; i++) {
-                        int ft = firing_times[i*2 + 0];        // firing time
-                        int nid = firing_times[i*2 + 1];    // neuron id
+                        int ft = firing_times[i].time_ms;   // firing time
+                        int nid = firing_times[i].neuron;   // neuron id
                         if (ft < display_start)
                             continue;
                         float x = rx + map((float)nid, 0.0, (float)grid.numCells, 0.0, rw);
@@ -1158,5 +1173,6 @@ int main(void)
     arrfree(palette);
 
     CloseWindow();
+
     return 0;
 }
