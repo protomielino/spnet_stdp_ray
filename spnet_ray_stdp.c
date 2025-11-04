@@ -449,13 +449,11 @@ static void init_network(Grid *grid)
         int K = neurons[i].is_exc ? CE : CI;
         CellPos *selected = NULL;
         arrsetlen(selected, neurons[i].is_exc ? CE : CI);
-        int selected_count = 0;
 
-        int rmin = 0;
         int rmax = neurons[i].is_exc ? 6 : 3;
         CellPos this_cell = grid_index_to_cellpos(grid, i, &this_cell.r, &this_cell.c);
         // primo picking iniziale
-        selected_count = grid_pick_random_cells_in_annulus(grid, this_cell.r, this_cell.c, 0, rmax, K, selected);
+        grid_pick_random_cells_in_annulus(grid, this_cell.r, this_cell.c, 0, rmax, K, selected);
 
         neurons[i].outconn.targets = NULL;
         neurons[i].outconn.weights = NULL;
@@ -598,15 +596,13 @@ static void sim_step(Grid *grid)
     /* 1) Deliver all events in the current bucket (arrivals scheduled for this ms) */
     DelayBucket *db = &delaybuckets[current_delay_index];
     /* produce an input array I for this ms */
-    static float *I = NULL;
-    arrsetlen(I, grid->numCells);
     for (int i = 0; i < grid->numCells; i++)
-        I[i] = 0.0f;
+        neurons[i].I = 0.0f;
 
     for (int k = 0; k < db->count; k++) {
         int neuron = db->neuron[k];
         float w = db->weight[k];
-        I[neuron] += w;
+        neurons[neuron].I += w;
     }
     /* clear bucket for reuse (it will be filled for future times) */
     bucket_clear(db);
@@ -615,14 +611,14 @@ static void sim_step(Grid *grid)
     for (int i = 0; i < grid->numCells; i++) {
         if (neurons[i].is_exc)
             if (frandf() < 0.01f)
-                I[i] += 24.0f * frandf();
+                neurons[i].I += 24.0f * frandf();
     }
 
     int num_steps = 2;
     for (int step = 0; step < num_steps; ++step) {
         /* 3) Integrate neuron dynamics (Izhikevich) */
         for (int i = 0; i < grid->numCells; i++) {
-            float dv = 0.04f * neurons[i].v * neurons[i].v + 5.0f * neurons[i].v + 140.0f - neurons[i].u + I[i];
+            float dv = 0.04f * neurons[i].v * neurons[i].v + 5.0f * neurons[i].v + 140.0f - neurons[i].u + neurons[i].I;
             neurons[i].v += dv * (DT / (float)num_steps);
             neurons[i].u += neurons[i].a * (neurons[i].b * neurons[i].v - neurons[i].u) * (DT / (float)num_steps);
         }
@@ -659,8 +655,6 @@ static void sim_step(Grid *grid)
         neurons[i].v_hist[vhist_idx] = neurons[i].v;
         neurons[i].u_hist[uhist_idx] = neurons[i].u;
     }
-
-    arrfree(I);
 }
 
 /* compute mean excitatory weight */
@@ -841,7 +835,7 @@ int main(void)
 
     int grid_width = (WIDTH - 2*MARGIN);
     int grid_height = (HEIGHT - 2*MARGIN);
-    int num_cells = 100000;
+    int num_cells = 1000;
     gridFactors gf = factors(num_cells, (double)grid_width/(double)grid_height);;
     Grid grid = {
             .numCols = gf.cols,
