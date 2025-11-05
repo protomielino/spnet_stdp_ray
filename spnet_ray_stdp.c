@@ -401,6 +401,30 @@ gridFactors factors(long long num, double R)
     return ret;
 }
 
+static float mm_per_cell(Grid *grid)
+{
+    const float R_mm = 8.0f;
+    const float area_mm2 = 4.0f * 3.14159265358979323846f * R_mm * R_mm;
+    const float mm2_per_cell = area_mm2 / (float)grid->numCells;
+    return sqrtf(mm2_per_cell);
+}
+
+static float mm_to_cells_float(Grid *grid, float mm)
+{
+    return mm / mm_per_cell(grid);
+}
+
+static unsigned char compute_delay_from_cells(Grid *grid, int cell_dist, float velocity_m_per_s)
+{
+    float dist_mm = cell_dist * mm_per_cell(grid);
+    float dist_m = dist_mm / 1000.0f;
+    float d_ms = (dist_m / velocity_m_per_s) * 1000.0f;
+    int di = (int)ceilf(d_ms);
+    if (di < 1) di = 1;
+    if (di > MAX_DELAY) di = MAX_DELAY;
+    return (unsigned char)di;
+}
+
 /* Initialize network (connections, weights, delays, v/u, buffers) */
 static void init_network(Grid *grid)
 {
@@ -434,6 +458,17 @@ static void init_network(Grid *grid)
         neurons[i].cell_activity = 0.0f;
     }
 
+    /* parametri del paper in mm */
+    const float local_exc_span_mm = 1.5f;
+    const float inh_span_mm = 0.5f;
+    const float collateral_radius_mm = 0.5f;
+    const float long_range_axon_length_mm = 12.0f;
+    const float vel_myelinated = 1.0f;
+    const float vel_unmyelinated = 0.15f;
+    const int exc_local_targets = 75;
+    const int exc_distant_targets = 25;
+    const int inh_local_targets = 25;
+
     /* init neurons usando flags[i] */
     for (int i = 0; i < grid->numCells; i++) {
         float ra = 0.0f;
@@ -463,7 +498,7 @@ static void init_network(Grid *grid)
     for (int i = 0; i < grid->numCells; i++) {
         int K = neurons[i].is_exc ? CE : CI;
         CellPos *selected = NULL;
-        arrsetlen(selected, neurons[i].is_exc ? CE : CI);
+        arrsetlen(selected, K);
 
         int rmax = neurons[i].is_exc ? 6 : 3;
         CellPos this_cell = grid_index_to_cellpos(grid, i, &this_cell);
