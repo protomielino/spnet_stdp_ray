@@ -129,37 +129,38 @@ typedef struct
 
 typedef struct
 {
-    int r, c;
+    int r;
+    int c;
 } CellPos;
 
-int grid_toroidal_dist_sq(Grid *grid, int r1, int c1, int r2, int c2)
+int grid_toroidal_dist_sq(Grid *grid, CellPos cell1, CellPos cell2)
 {
     // distanza al quadrato considerando wrap-around (toroide) con metriche di griglia euclidea
-    int dr = abs(r1 - r2);
-    int dc = abs(c1 - c2);
+    int dr = abs(cell1.r - cell2.r);
+    int dc = abs(cell1.c - cell2.c);
     if (dr > grid->numRows/2) dr = grid->numRows - dr;
     if (dc > grid->numCols/2) dc = grid->numCols - dc;
     return dr*dr + dc*dc;
 }
 
 // Restituisce 1 se la cella (r,c) è in [rmin,rmax] (inclusi) rispetto a centro (rc,cc)
-int grid_in_annulus(Grid *grid, int r, int c, int rc, int cc, int rmin, int rmax)
+int grid_in_annulus(Grid *grid, CellPos cell, CellPos center_cell, int rmin, int rmax)
 {
-    int dsq = grid_toroidal_dist_sq(grid, r, c, rc, cc);
+    int dsq = grid_toroidal_dist_sq(grid, cell, center_cell);
     return (dsq >= rmin*rmin && dsq <= rmax*rmax);
 }
 
 // Seleziona k celle casuali nell'anello [rmin,rmax] attorno al centro.
 // Restituisce il numero effettivo di celle selezionate (<= k)
 // out array deve avere capacità almeno k.
-int grid_pick_random_cells_in_annulus(Grid *grid, int rc, int cc, int rmin, int rmax, int k, CellPos *out)
+int grid_pick_random_cells_in_annulus(Grid *grid, CellPos center_cell, int rmin, int rmax, int k, CellPos *out)
 {
     // Raccogli tutte le celle ammissibili
     CellPos *candidates = NULL;
     int cnt = 0;
     for (int r = 0; r < grid->numRows; r++) {
         for (int c = 0; c < grid->numCols; c++) {
-            if (grid_in_annulus(grid, r, c, rc, cc, rmin, rmax)) {
+            if (grid_in_annulus(grid, (CellPos){r, c}, center_cell, rmin, rmax)) {
                 CellPos cand = {r, c};
                 arrput(candidates, cand);
             }
@@ -222,9 +223,8 @@ static FiringTime *firing_times = NULL;            /* circular buffer of pairs (
 static int firing_count = 0;
 static int firing_cap = FIRING_BUF;
 
-/* per-neuron v history index for selected trace (circular) */
+/* per-neuron v/u history index for selected trace (circular) */
 static int vhist_idx = 0;
-/* per-neuron u history index for selected trace (circular) */
 static int uhist_idx = 0;
 
 /* Selected neuron */
@@ -257,11 +257,10 @@ static float clampf(float x, float a, float b)
 }
 
 /* helper: convert index -> row,col and viceversa */
-static inline CellPos grid_index_to_cellpos(Grid *grid, int idx, int *r, int *c)
+static inline CellPos grid_index_to_cellpos(Grid *grid, int idx, CellPos *cell)
 {
-    *r = idx / grid->numCols;
-    *c = idx % grid->numCols;
-    return (CellPos){ *r, *c };
+    *cell = (CellPos){idx / grid->numCols, idx % grid->numCols};
+    return *cell;
 }
 static inline int grid_cellpos_to_index(Grid *grid, CellPos cell)
 {
@@ -467,9 +466,9 @@ static void init_network(Grid *grid)
         arrsetlen(selected, neurons[i].is_exc ? CE : CI);
 
         int rmax = neurons[i].is_exc ? 6 : 3;
-        CellPos this_cell = grid_index_to_cellpos(grid, i, &this_cell.r, &this_cell.c);
+        CellPos this_cell = grid_index_to_cellpos(grid, i, &this_cell);
         // primo picking iniziale
-        grid_pick_random_cells_in_annulus(grid, this_cell.r, this_cell.c, 0, rmax, K, selected);
+        grid_pick_random_cells_in_annulus(grid, this_cell, 0, rmax, K, selected);
 
         neurons[i].outconn.targets = NULL;
         neurons[i].outconn.weights = NULL;
@@ -876,14 +875,13 @@ int main(void)
     int k = CE; // numero di celle da estrarre
 
     // centro iniziale al centro della griglia
-    int center_r = grid.numRows / 2;
-    int center_c = grid.numCols / 2;
+    CellPos center = { grid.numRows / 2, grid.numCols / 2 };
 
     CellPos *selected = (CellPos*)malloc(k * sizeof(CellPos));
     int selected_count = 0;
 
     // primo picking iniziale
-    selected_count = grid_pick_random_cells_in_annulus(&grid, center_r, center_c, rmin, rmax, k, selected);
+    selected_count = grid_pick_random_cells_in_annulus(&grid, center, rmin, rmax, k, selected);
 
     InitWindow(WIDTH, HEIGHT, "spnet_ray_stdp - Izhikevich + STDP (C + raylib)");
     SetTargetFPS(30);
@@ -917,7 +915,7 @@ int main(void)
         }
         if (IsKeyPressed(KEY_SPACE) && IsKeyDown(KEY_LEFT_SHIFT)) {
             // rimescola nuove celle
-            selected_count = grid_pick_random_cells_in_annulus(&grid, center_r, center_c, rmin, rmax, k, selected);
+            selected_count = grid_pick_random_cells_in_annulus(&grid, center, rmin, rmax, k, selected);
         }
         if (IsKeyPressed(KEY_UP))
             steps_per_frame = Clamp(steps_per_frame+1, 1, 5000);
@@ -931,22 +929,22 @@ int main(void)
             // diminuisce rmax (esempio)
             if (rmax > rmin)
                 rmax--;
-            selected_count = grid_pick_random_cells_in_annulus(&grid, center_r, center_c, rmin, rmax, k, selected);
+            selected_count = grid_pick_random_cells_in_annulus(&grid, center, rmin, rmax, k, selected);
         }
         if (IsKeyPressed(KEY_RIGHT)) {
             // aumenta rmax (esempio)
             rmax++;
-            selected_count = grid_pick_random_cells_in_annulus(&grid, center_r, center_c, rmin, rmax, k, selected);
+            selected_count = grid_pick_random_cells_in_annulus(&grid, center, rmin, rmax, k, selected);
         }
         if (IsKeyPressed(KEY_UP)) {
             if (rmin < rmax)
                 rmin++;
-            selected_count = grid_pick_random_cells_in_annulus(&grid, center_r, center_c, rmin, rmax, k, selected);
+            selected_count = grid_pick_random_cells_in_annulus(&grid, center, rmin, rmax, k, selected);
         }
         if (IsKeyPressed(KEY_DOWN)) {
             if (rmin > 0)
                 rmin--;
-            selected_count = grid_pick_random_cells_in_annulus(&grid, center_r, center_c, rmin, rmax, k, selected);
+            selected_count = grid_pick_random_cells_in_annulus(&grid, center, rmin, rmax, k, selected);
         }
 
         if (IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
@@ -976,9 +974,8 @@ int main(void)
                 int c = map(rel_x, 0, grid.width, 0, grid.numCols);
                 int r = map(rel_y, 0, grid.height, 0, grid.numRows);;
                 if (r >= 0 && r < grid.numRows && c >= 0 && c < grid.numCols) {
-                    center_r = r;
-                    center_c = c;
-                    selected_count = grid_pick_random_cells_in_annulus(&grid, center_r, center_c, rmin, rmax, k, selected);
+                    center = (CellPos){r, c};
+                    selected_count = grid_pick_random_cells_in_annulus(&grid, center, rmin, rmax, k, selected);
                 }
             }
         }
@@ -1002,7 +999,7 @@ int main(void)
 //                    for (int ni = 0; ni < grid->numCells; ++ni) {
 //                        CellPos cell_rc = {0};
 //                        cell_rc = index_to_cellpos(ni, &cell_rc.r, &cell_rc.c);
-//                        if (in_annulus(cell_rc.r, cell_rc.c, center_r, center_c, rmin, rmax)) {
+//                        if (in_annulus(cell_rc.r, cell_rc.c, center, rmin, rmax)) {
 //                            Vector2 cell_xy = cellpos_to_vec2(cell_rc);
 //                            DrawRectangleLines(cell_xy.x+1, cell_xy.y+1, grid->cellWidth - 2, grid->cellHeight - 2, (Color){200, 230, 255, 255});
 //                        }
@@ -1041,8 +1038,8 @@ int main(void)
                             int post = neurons[selected_neuron].outconn.targets[i];
                             CellPos this_cell_pos_rc = {0};
                             CellPos post_cell_pos_rc = {0};
-                            this_cell_pos_rc = grid_index_to_cellpos(&grid, selected_neuron, &this_cell_pos_rc.r, &this_cell_pos_rc.c);
-                            post_cell_pos_rc = grid_index_to_cellpos(&grid, post, &post_cell_pos_rc.r, &post_cell_pos_rc.c);
+                            this_cell_pos_rc = grid_index_to_cellpos(&grid, selected_neuron, &this_cell_pos_rc);
+                            post_cell_pos_rc = grid_index_to_cellpos(&grid, post, &post_cell_pos_rc);
                             Vector2 this_cell_pos_xy = grid_cellpos_to_vec2(&grid, this_cell_pos_rc);
                             Vector2 post_cell_pos_xy = grid_cellpos_to_vec2(&grid, post_cell_pos_rc);
                             this_cell_pos_xy = Vector2Add(this_cell_pos_xy, (Vector2){ grid.cellWidth/2, grid.cellHeight/2 });
@@ -1050,11 +1047,6 @@ int main(void)
                             DrawLineV(this_cell_pos_xy, post_cell_pos_xy, WHITE);
                         }
                     }
-
-                    // testo di stato
-                    DrawText(TextFormat("Center: (%d,%d)  rmin=%d  rmax=%d  selected=%d", center_r, center_c, rmin, rmax, selected_count),
-                             10, grid.height - 20, 10, GRAY);
-                    DrawText("Space: new pick  Click: set center  Up/Down: rmin  RIGHT/LEFT: rmax", 10, grid.height - 36, 10, GRAY);
                 }
                 if (graphics_raster) {
                     /* Raster */
