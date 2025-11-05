@@ -1,36 +1,3 @@
-/*
- spnet_ray_stdp.c
- C single-threaded simulation of an Izhikevich spiking network with delays and STDP,
- plus realtime visualization using raylib.
-
- Features:
- - NE=800 excitatory, NI=200 inhibitory (default from user).
- - Delays for excitatory synapses (1..20 ms). Inhibitory delay = 1 ms.
- - STDP on excitatory synapses (pair-based approximation), weight bounds.
- - Spike delivery via delay queues.
- - Interactive selection of a neuron by clicking the raster; shows v(t) trace for that neuron.
- - Single-threaded: simulation steps performed inside render loop. Controls:
-     SPACE: pause/run
-     UP/DOWN: increase/decrease steps/frame
-     R: reset network
-     Left click raster area: select neuron
- - Visualization:
-     Raster (last 1000 ms), v snapshot, mean excitatory weight bar, v(t) trace for selected neuron.
- - Reasonable memory/layout for realtime interactivity.
-
- Build:
-  - With CMake (assumes raylibConfig.cmake available):
-      cmake -S . -B build
-      cmake --build build
-  - Or with gcc + pkg-config:
-      gcc spnet_ray_stdp.c -o spnet_ray_stdp `pkg-config --cflags --libs raylib` -lm
-
- Notes:
-  - Simplifications compared to full Izhikevich reference: STDP uses pair-based exponential windows,
-    no homeostatic scaling, weight updates applied at spike times to outgoing excitatory synapses.
-  - Performance tuned for moderate network size; reduce NE/CI/CE if too slow.
-*/
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,11 +20,6 @@ ColourEntry *palette = NULL;
 /* Window */
 #define WIDTH 1360
 #define HEIGHT 768
-
-/* Network params */
-//#define NE 800
-//#define NI 200
-//#define N (NE+NI)
 
 //#define CE 75  /* excitatory outgoing per neuron */
 #define CI 25   /* inhibitory outgoing per neuron */
@@ -84,33 +46,10 @@ typedef struct
     float cellHeight; // pixel
 } Grid;
 
-//static int GRID_COLS;
-//static int GRID_ROWS;
-//static int CELLS; // this number needs to be == N == NE+NI
-//static float CELL_W; // in mm
-//static float CELL_H; // in mm
-//static int GRID_W;
-//static int GRID_H;
-
 float rand01(void)
 {
     return (float)rand() / (float)RAND_MAX;
 }
-
-//// sqrtf done the quakeIII way (slower than gnu sqrtf on amd phenomII)
-//float d_sqrt(float number)
-//{
-//    int i;
-//    float x, y;
-//    x = number * 0.5;
-//    y = number;
-//    i = *(int*)&y;
-//    i = 0x5f3759df - (i >> 1);
-//    y = *(float*)&i;
-//    y = y * (1.5 - (x * y * y));
-//    y = y * (1.5 - (x * y * y));
-//    return number * y;
-//}
 
 uint f_randi(uint32_t index)
 {
@@ -503,7 +442,6 @@ static void init_network(Grid *grid)
         neurons[i].outconn.weights = NULL;
         neurons[i].outconn.delay = NULL;
 
-        int filled = 0;
         CellPos this_cell = {0};
         grid_index_to_cellpos(grid, i, &this_cell);
 
@@ -528,50 +466,46 @@ static void init_network(Grid *grid)
                     arrput(neurons[i].outconn.weights, -5.0f * frandf());
                     arrput(neurons[i].outconn.delay, 1);
                 }
-                filled++;
             }
         }
         arrfree(tmp);
 
-//        /* 2) excitatory distant targets: scegli punto a distanza ~12mm e prendi annulus radius = 0.5mm attorno ad esso */
-//        if (is_exc && filled < K) {
-//            /* convert lengths to cells */
-//            int target_cell_dist = (int)roundf(mm_to_cells_float(long_range_axon_length_mm));
-//            int collateral_rcells = (int)ceilf(mm_to_cells_float(collateral_radius_mm));
-//
-//            /* troviamo candidate center cells a distanza target_cell_dist (annulus rmin=r-1,rmax=r+1) */
-//            CellPos *ring = NULL;
-//            arrsetlen(ring, 0);
-//            /* usa annulus intorno al centro della sorgente: rmin=rmax=target_cell_dist per cercare celle a quella distanza */
-//            int found_ring = pick_random_cells_in_annulus(cr, cc, target_cell_dist - 1, target_cell_dist + 1, CELLS, ring);
-//            /* se non troviamo abbastanza centri, accettiamo quelli trovati; da ciascuno prendiamo fino a exc_distant_targets */
-//            if (found_ring > 0) {
-//                /* shuffle ring per casualità */
-//                for (int s = found_ring - 1; s > 0; --s) {
-//                    int q = rand() % (s + 1);
-//                    CellPos tmpc = ring[s]; ring[s] = ring[q]; ring[q] = tmpc;
-//                }
-//                int need = exc_distant_targets;
-//                for (int rc_idx = 0; rc_idx < found_ring && need > 0; ++rc_idx) {
-//                    CellPos center = ring[rc_idx];
-//                    CellPos *near = NULL;
-//                    arrsetlen(near, 0);
-//                    int got = pick_random_cells_in_annulus(center.r, center.c, 0, collateral_rcells, need, near);
-//                    for (int jj = 0; jj < got && filled < K; ++jj) {
-//                        int targ = cellpos_to_index(near[jj].r, near[jj].c);
-//                        neurons[i].outconn.targets[filled] = targ;
-//                        neurons[i].outconn.weights[filled] = 6.0f * frandf();
-//                        int dsq = toroidal_dist_sq(cr, cc, near[jj].r, near[jj].c);
-//                        int cell_dist = (int)floorf(sqrtf((float)dsq) + 0.5f);
-//                        neurons[i].outconn.delay[filled] = compute_delay_from_cells(cell_dist, vel_myelinated);
-//                        filled++; need--;
-//                    }
-//                    arrfree(near);
-//                }
-//            }
-//            arrfree(ring);
-//        }
-//
+        /* 2) excitatory distant targets: scegli punto a distanza ~12mm e prendi annulus radius = 0.5mm attorno ad esso */
+        if (is_exc) {
+            /* convert lengths to cells */
+            int target_cell_dist = (int)roundf(mm_to_cells_float(grid, long_range_axon_length_mm));
+            int collateral_rcells = (int)ceilf(mm_to_cells_float(grid, collateral_radius_mm));
+
+            /* troviamo candidate center cells a distanza target_cell_dist (annulus rmin=r-1,rmax=r+1) */
+            CellPos *ring = NULL;
+            int need_ring = 1;
+            arrsetlen(ring, need_ring);
+            /* usa annulus intorno al centro della sorgente: rmin=rmax=target_cell_dist per cercare celle a quella distanza */
+            int found_ring = grid_pick_random_cells_in_annulus(grid, this_cell, target_cell_dist - 1, target_cell_dist + 1, need_ring, ring);
+            arrsetlen(ring, found_ring);
+            /* se non troviamo abbastanza centri, accettiamo quelli trovati; da ciascuno prendiamo fino a exc_distant_targets */
+            if (found_ring > 0) {
+                int need = exc_distant_targets;
+                for (int rc_idx = 0; rc_idx < found_ring && need > 0; ++rc_idx) {
+                    CellPos center = ring[rc_idx];
+                    CellPos *near = NULL;
+                    arrsetlen(near, need);
+                    int got = grid_pick_random_cells_in_annulus(grid, center, 0, collateral_rcells, need, near);
+                    arrsetlen(near, got);
+                    for (int jj = 0; jj < got; ++jj) {
+                        int targ = grid_cellpos_to_index(grid, near[jj]);
+                        arrput(neurons[i].outconn.targets, targ);
+                        arrput(neurons[i].outconn.weights, 6.0f * frandf());
+                        int dsq = grid_toroidal_dist_sq(grid, center, near[jj]);
+                        int cell_dist = (int)floorf(sqrtf((float)dsq) + 0.5f);
+                        arrput(neurons[i].outconn.delay, compute_delay_from_cells(grid, cell_dist, vel_myelinated));
+                    }
+                    arrfree(near); near = NULL;
+                }
+            }
+            arrfree(ring); ring = NULL;
+        }
+
 //        /* 3) riempi con bersagli casuali se necessario */
 //        while (filled < K) {
 //            int targ = rand() % N;
