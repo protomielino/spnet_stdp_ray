@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "grid.h"
+
 #define VUBUF_LEN_MS 2000
 
 /* Outgoing connections structure */
@@ -30,7 +32,11 @@ typedef struct
     float u_hist[VUBUF_LEN_MS]; /* u_hist[idx] */
     float I;
 
-    OutConn outconn;            /* size N */
+    OutConn outconn;
+    CellPos target_center;
+    int num_targets;
+    int num_near_conn;
+    int num_far_conn;
 
     uint8_t is_exc;
 

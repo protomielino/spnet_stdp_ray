@@ -12,6 +12,7 @@
 #define STB_DS_IMPLEMENTATION
 #include "stb_ds.h"
 
+#include "grid.h"
 #include "palette.h"
 #include "neuron.h"
 
@@ -46,7 +47,7 @@ typedef struct
     float cellHeight; // pixel
 } Grid;
 
-float rand01(void)
+float rand01()
 {
     return (float)rand() / (float)RAND_MAX;
 }
@@ -65,12 +66,6 @@ typedef struct
     int count;
     int cap;
 } DelayBucket;
-
-typedef struct
-{
-    int r;
-    int c;
-} CellPos;
 
 int grid_toroidal_dist_sq(Grid *grid, CellPos cell1, CellPos cell2)
 {
@@ -155,6 +150,8 @@ typedef struct
 } FiringTime;
 
 /* Globals */
+int num_exc = 0.0; // number of exc neurons
+int num_inh = 0.0; // number of inh neurons
 static IzkNeuron *neurons = NULL;
 static DelayBucket *delaybuckets = NULL;    /* index 1..MAX_DELAY used; 0 unused */
 static int current_delay_index = 0;         /* rotates every ms */
@@ -180,7 +177,7 @@ float map(float input, float input_start, float input_end, float output_start, f
 }
 
 /* Utility random */
-static float frandf(void)
+static float frandf()
 {
     return (float)rand() / (float)RAND_MAX;
 }
@@ -219,7 +216,7 @@ static inline Vector2 grid_cellpos_to_vec2(Grid *grid, CellPos cp)
 }
 
 /* Initialize delay buckets */
-static void init_delay_buckets(void)
+static void init_delay_buckets()
 {
     if (arrlen(delaybuckets) != 0) {
         arrfree(delaybuckets);
@@ -371,18 +368,17 @@ static void init_network(Grid *grid)
     vhist_idx = 0;
     uhist_idx = 0;
 
-    /* Alloca e imposta tutto eccitatorio/inibitorio casualmente:
-     * crea un array di N zeri, imposta NE posizioni a 1 senza
-     * ripetizione (Fisher–Yates)*/
-    /* flags: 1 = eccitatorio, 0 = inibitorio */
-    float exc_to_inh_ratio = 3.0 / 4.0; // exc to inh ratio
-    int num_exc = grid->numCells * exc_to_inh_ratio; // number of exc neurons
+    // exc to inh ratio (from paper)
+    float exc_to_inh_ratio = 1.0/(4.0 + 1.0);
+    num_exc = grid->numCells * exc_to_inh_ratio * 4.0; // number of exc neurons
+    num_inh = grid->numCells * exc_to_inh_ratio * 1.0; // number of inh neurons
 
+    /* flags: 1 = eccitatorio, 0 = inibitorio */
     uint8_t *flags = (uint8_t*)calloc(grid->numCells, sizeof(uint8_t));
     int *pool = (int*)malloc(grid->numCells * sizeof(int));
     for (int i = 0; i < grid->numCells; ++i)
         pool[i] = i;
-    for (int k = 0; k < num_exc; ++k) {
+    for (int k = 0; k < grid->numCells; ++k) {
         int r = rand() % (grid->numCells - k);
         flags[pool[r]] = 1;
         pool[r] = pool[grid->numCells - k - 1]; /* rimosso dallo pool */
@@ -415,13 +411,10 @@ static void init_network(Grid *grid)
 
         neurons[i].is_exc = (uint8_t)flags[i];
 
-        ra = rand01();
+        ra = rand01(); ra2 = ra * ra;
         neurons[i].a = neurons[i].is_exc ? 0.02f : 0.02f + 0.08f * ra;
-        ra = rand01();
         neurons[i].b = neurons[i].is_exc ? 0.2f : 0.25f - 0.05f * ra;
-        ra = rand01(); ra2 = ra * ra;
         neurons[i].c = neurons[i].is_exc ? -65.0f + 15.0f * ra2 : -65.0f;
-        ra = rand01(); ra2 = ra * ra;
         neurons[i].d = neurons[i].is_exc ? 8.0f - 6.0f * ra2 : 2.0f;
 
         neurons[i].v = neurons[i].c;
@@ -441,34 +434,43 @@ static void init_network(Grid *grid)
         neurons[i].outconn.targets = NULL;
         neurons[i].outconn.weights = NULL;
         neurons[i].outconn.delay = NULL;
+        neurons[i].num_targets = 0;
+        neurons[i].num_near_conn = 0;
+        neurons[i].num_far_conn = 0;
+        neurons[i].target_center = (CellPos){0};
 
         CellPos this_cell = {0};
         grid_index_to_cellpos(grid, i, &this_cell);
 
         /* 1) local targets: usa annulus con rmin=0, rmax = radius_in_cells */
         float local_mm = is_exc ? local_exc_span_mm : inh_span_mm;
-        int rmax_local = (int)ceilf(mm_to_cells_float(grid, local_mm));
-        CellPos *tmp = NULL;
+        int cells_rmax_local = (int)ceilf(mm_to_cells_float(grid, local_mm));
+        int cells_rmin_local = 0;
+        CellPos *local_post = NULL;
         int need = is_exc ? exc_local_targets : inh_local_targets;
-        arrsetlen(tmp, need);
-        int found_local = grid_pick_random_cells_in_annulus(grid, this_cell, 0, rmax_local, need, tmp);
-        arrsetlen(tmp, found_local);
+        arrsetlen(local_post, need);
+        int found_local = grid_pick_random_cells_in_annulus(grid,
+                this_cell,
+                cells_rmin_local, cells_rmax_local,
+                need,
+                local_post);
+        arrsetlen(local_post, found_local);
         for (int j = 0; j < found_local; ++j) {
-            int targ = grid_cellpos_to_index(grid, tmp[j]);
+            int targ = grid_cellpos_to_index(grid, local_post[j]);
             if (targ != i) {
                 arrput(neurons[i].outconn.targets, targ);
                 if (is_exc) {
                     arrput(neurons[i].outconn.weights, 6.0f * frandf());
-                    int dsq = grid_toroidal_dist_sq(grid, this_cell, tmp[j]);
-                    int cell_dist = (int)floorf(sqrtf((float)dsq) + 0.5f);
-                    arrput(neurons[i].outconn.delay, compute_delay_from_cells(grid, cell_dist, vel_unmyelinated));
                 } else {
                     arrput(neurons[i].outconn.weights, -5.0f * frandf());
-                    arrput(neurons[i].outconn.delay, 1);
                 }
+                int dsq = grid_toroidal_dist_sq(grid, this_cell, local_post[j]);
+                int cell_dist = (int)floorf(sqrtf((float)dsq) + 0.5f);
+                arrput(neurons[i].outconn.delay, compute_delay_from_cells(grid, cell_dist, vel_unmyelinated));
+                neurons[i].num_near_conn ++;
             }
         }
-        arrfree(tmp);
+        arrfree(local_post);
 
         /* 2) excitatory distant targets: scegli punto a distanza ~12mm e prendi annulus radius = 0.5mm attorno ad esso */
         if (is_exc) {
@@ -477,33 +479,42 @@ static void init_network(Grid *grid)
             int collateral_rcells = (int)ceilf(mm_to_cells_float(grid, collateral_radius_mm));
 
             /* troviamo candidate center cells a distanza target_cell_dist (annulus rmin=r-1,rmax=r+1) */
-            CellPos *ring = NULL;
-            int need_ring = 1;
-            arrsetlen(ring, need_ring);
+            CellPos *distant_targets = NULL;
+            int need_distant_targets = 1;
+            arrsetlen(distant_targets, need_distant_targets);
             /* usa annulus intorno al centro della sorgente: rmin=rmax=target_cell_dist per cercare celle a quella distanza */
-            int found_ring = grid_pick_random_cells_in_annulus(grid, this_cell, target_cell_dist - 1, target_cell_dist + 1, need_ring, ring);
-            arrsetlen(ring, found_ring);
+            int found_distant_targets = grid_pick_random_cells_in_annulus(grid, this_cell, target_cell_dist - 1, target_cell_dist + 1, need_distant_targets, distant_targets);
+            arrsetcap(distant_targets, found_distant_targets);
+            arrsetlen(distant_targets, found_distant_targets);
             /* se non troviamo abbastanza centri, accettiamo quelli trovati; da ciascuno prendiamo fino a exc_distant_targets */
-            if (found_ring > 0) {
+            if (found_distant_targets > 0) {
                 int need = exc_distant_targets;
-                for (int rc_idx = 0; rc_idx < found_ring && need > 0; ++rc_idx) {
-                    CellPos center = ring[rc_idx];
-                    CellPos *near = NULL;
-                    arrsetlen(near, need);
-                    int got = grid_pick_random_cells_in_annulus(grid, center, 0, collateral_rcells, need, near);
-                    arrsetlen(near, got);
+                for (int dist_targ_idx = 0; dist_targ_idx < found_distant_targets && need > 0; ++dist_targ_idx) {
+                    CellPos center = distant_targets[dist_targ_idx];
+                    neurons[i].target_center = center;
+                    CellPos *far_post = NULL;
+                    arrsetlen(far_post, need);
+                    int got = grid_pick_random_cells_in_annulus(grid, center, 0, collateral_rcells, need, far_post);
+                    arrsetcap(far_post, got);
+                    arrsetlen(far_post, got);
                     for (int jj = 0; jj < got; ++jj) {
-                        int targ = grid_cellpos_to_index(grid, near[jj]);
+                        int targ = grid_cellpos_to_index(grid, far_post[jj]);
                         arrput(neurons[i].outconn.targets, targ);
                         arrput(neurons[i].outconn.weights, 6.0f * frandf());
-                        int dsq = grid_toroidal_dist_sq(grid, center, near[jj]);
+                        int dsq = grid_toroidal_dist_sq(grid, center, far_post[jj]);
                         int cell_dist = (int)floorf(sqrtf((float)dsq) + 0.5f);
-                        arrput(neurons[i].outconn.delay, compute_delay_from_cells(grid, cell_dist, vel_myelinated));
+                        arrput(neurons[i].outconn.delay, compute_delay_from_cells(grid, cell_dist, vel_unmyelinated));
+                        neurons[i].num_far_conn ++;
                     }
-                    arrfree(near); near = NULL;
+                    arrfree(far_post); far_post = NULL;
+
+                    int dsq = grid_toroidal_dist_sq(grid, center, distant_targets[dist_targ_idx]);
+                    int cell_dist = (int)floorf(sqrtf((float)dsq) + 0.5f);
+                    arrput(neurons[i].outconn.delay, compute_delay_from_cells(grid, cell_dist, vel_myelinated));
+                    neurons[i].num_targets ++;
                 }
             }
-            arrfree(ring); ring = NULL;
+            arrfree(distant_targets); distant_targets = NULL;
         }
 
 //        /* 3) riempi con bersagli casuali se necessario */
@@ -671,6 +682,9 @@ static void schedule_spike_delivery(int pre, int conn_index)
     bucket_push(&delaybuckets[bucket_idx], post, w);
 }
 
+static float input_prob = 0.01f;
+static float input_val = 24.0f;
+
 /* Simulation single step (1 ms) */
 static void sim_step(Grid *grid)
 {
@@ -691,39 +705,39 @@ static void sim_step(Grid *grid)
     /* 2) External noisy input: Poisson-like drive to excitatory neurons */
     for (int i = 0; i < grid->numCells; i++) {
         if (neurons[i].is_exc)
-            if (frandf() < 0.01f)
-                neurons[i].I += 24.0f * frandf();
+            if (frandf() < input_prob)
+                neurons[i].I += input_val * frandf();
     }
 
+    /* 3) Integrate neuron dynamics (Izhikevich) */
     int num_steps = 2;
     for (int step = 0; step < num_steps; ++step) {
-        /* 3) Integrate neuron dynamics (Izhikevich) */
         for (int i = 0; i < grid->numCells; i++) {
             float dv = 0.04f * neurons[i].v * neurons[i].v + 5.0f * neurons[i].v + 140.0f - neurons[i].u + neurons[i].I;
             neurons[i].v += dv * (DT / (float)num_steps);
             neurons[i].u += neurons[i].a * (neurons[i].b * neurons[i].v - neurons[i].u) * (DT / (float)num_steps);
         }
+    }
 
-        /* 4) Check for spikes (v >= 30) */
-        for (int i = 0; i < grid->numCells; i++) {
-            if (neurons[i].v >= 30.0f) {
-                /* record spike */
-                add_firing_record(t_ms, i);
-                /* STDP: apply pre-spike rule (depression for pre after recent post) */
-                apply_stdp_on_pre(i, t_ms);
-                /* reset */
-                neurons[i].v = neurons[i].c;
-                neurons[i].u += neurons[i].d;
-                /* schedule deliveries to targets according to their delays */
-                int K = arrlen(neurons[i].outconn.targets);
-                for (int j = 0; j < K; j++) {
-                    schedule_spike_delivery(i, j);
-                }
-                /* STDP: handle post-spike LTP for incoming excitatory synapses */
-                apply_stdp_on_post(grid, i, t_ms);
-                /* update last spike time */
-                neurons[i].last_spike_time = t_ms;
+    /* 4) Check for spikes (v >= 30) */
+    for (int i = 0; i < grid->numCells; i++) {
+        if (neurons[i].v >= 30.0f) {
+            /* record spike */
+            add_firing_record(t_ms, i);
+            /* STDP: apply pre-spike rule (depression for pre after recent post) */
+            apply_stdp_on_pre(i, t_ms);
+            /* reset */
+            neurons[i].v = neurons[i].c;
+            neurons[i].u += neurons[i].d;
+            /* schedule deliveries to targets according to their delays */
+            int K = arrlen(neurons[i].outconn.targets);
+            for (int j = 0; j < K; j++) {
+                schedule_spike_delivery(i, j);
             }
+            /* STDP: handle post-spike LTP for incoming excitatory synapses */
+            apply_stdp_on_post(grid, i, t_ms);
+            /* update last spike time */
+            neurons[i].last_spike_time = t_ms;
         }
     }
 
@@ -764,10 +778,8 @@ static int neuron_from_raster_click(Grid *grid, int click_x, int click_y, int rx
     if (click_x < rx || click_x > rx+rw || click_y < ry || click_y > ry+rh)
         return -1;
     /* x -> neuron id: left excitatory, right inhibitory */
-    int rely = click_y - ry;
-    if (rely < 24) /* header area */
-        return -1;
-    int nid = -rx + map(click_x, 0.0, rw, 0.0, (float)grid->numCells);
+    int relx = click_x - rx;
+    int nid = map(relx, 0.0, rw, 0.0, grid->numCells);
     /* excitatory map */
     if (nid < 0)
         nid = 0;
@@ -888,21 +900,21 @@ void compute_cell_activity(Grid *grid)
 
 void grid_show(Grid *grid)
 {
-    DrawRectangleLines(MARGIN, MARGIN, grid->width, grid->height, WHITE);
-
     for (int r = 0; r < grid->numRows; r++) {
         for (int c = 0; c < grid->numCols; c++) {
             int idx = grid_cellpos_to_index(grid, (CellPos){r, c});
             float val = neurons[idx].cell_activity;
             Color col = Palette_Sample(&palette, val);
-            int x = MARGIN + (float)c * (float)grid->cellWidth;
-            int y = MARGIN + (float)r * (float)grid->cellHeight;
+            int x = MARGIN + (float)c * grid->cellWidth;
+            int y = MARGIN + (float)r * grid->cellHeight;
             DrawRectangle(x+1, y+1, grid->cellWidth - 1, grid->cellHeight - 1, col);
             if (idx == selected_neuron) {
                 DrawRectangleLines(x, y, grid->cellWidth, grid->cellHeight, MAGENTA);
             }
         }
     }
+
+    DrawRectangleLines(MARGIN, MARGIN, grid->width, grid->height, WHITE);
 
     // overlay UI text
 //    DrawText("Controls: P Pause | R Reset | +/- Speed | 1 AMPA 2 NMDA 3 GABAA 4 GABAB", 10, 8, 18, WHITE);
@@ -915,13 +927,16 @@ void grid_show(Grid *grid)
 //    DrawText(TextFormat("g_exc_gain: %f  g_inh_gain: %f", g_exc_gain, g_inh_gain), 10, 110, 16, WHITE);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     srand((unsigned)time(NULL));
 
     int grid_width = (WIDTH - 2*MARGIN);
     int grid_height = (HEIGHT - 2*MARGIN);
-    int num_cells = 2000;
+    int num_cells = 1000;
+    if (argc > 1)
+        num_cells = atoi(argv[1]);
+
     gridFactors gf = factors(num_cells, (double)grid_width/(double)grid_height);;
     Grid grid = {
             .numCols = gf.cols,
@@ -959,6 +974,19 @@ int main(void)
     {
         int mx = GetMouseX();
         int my = GetMouseY();
+
+        if (IsKeyPressed(KEY_F1)) {
+            input_prob -= 0.01;
+        }
+        if (IsKeyPressed(KEY_F2)) {
+            input_prob += 0.01;
+        }
+        if (IsKeyPressed(KEY_F3)) {
+            input_val -= 1.0;
+        }
+        if (IsKeyPressed(KEY_F4)) {
+            input_val += 1.0;
+        }
 
         /* input */
         if (IsKeyPressed(KEY_G)) {
@@ -1057,19 +1085,56 @@ int main(void)
 
                     if (selected_neuron >= 0) {
                         /* only excitatory neurons have CE */
-                        int K = arrlen(neurons[selected_neuron].outconn.targets);
-                        for (int i = 0; i < K; ++i) {
+                        int K_near = neurons[selected_neuron].num_near_conn;
+                        for (int i = 0; i < K_near; ++i) {
                             int post = neurons[selected_neuron].outconn.targets[i];
-                            CellPos this_cell_pos_rc = {0};
-                            CellPos post_cell_pos_rc = {0};
-                            this_cell_pos_rc = grid_index_to_cellpos(&grid, selected_neuron, &this_cell_pos_rc);
-                            post_cell_pos_rc = grid_index_to_cellpos(&grid, post, &post_cell_pos_rc);
-                            Vector2 this_cell_pos_xy = grid_cellpos_to_vec2(&grid, this_cell_pos_rc);
-                            Vector2 post_cell_pos_xy = grid_cellpos_to_vec2(&grid, post_cell_pos_rc);
-                            this_cell_pos_xy = Vector2Add(this_cell_pos_xy, (Vector2){ grid.cellWidth/2, grid.cellHeight/2 });
-                            post_cell_pos_xy = Vector2Add(post_cell_pos_xy, (Vector2){ grid.cellWidth/2, grid.cellHeight/2 });
-                            DrawLineV(this_cell_pos_xy, post_cell_pos_xy, WHITE);
+                            CellPos target_pos = {0};
+                            CellPos post_pos = {0};
+                            target_pos = grid_index_to_cellpos(&grid, selected_neuron, &target_pos);
+                            post_pos = grid_index_to_cellpos(&grid, post, &post_pos);
+                            Vector2 target_pos_xy = grid_cellpos_to_vec2(&grid, target_pos);
+                            Vector2 post_pos_xy = grid_cellpos_to_vec2(&grid, post_pos);
+                            target_pos_xy = Vector2Add(target_pos_xy, (Vector2){ grid.cellWidth/2, grid.cellHeight/2 });
+                            post_pos_xy = Vector2Add(post_pos_xy, (Vector2){ grid.cellWidth/2, grid.cellHeight/2 });
+                            DrawLineV(target_pos_xy, post_pos_xy, (Color){255, 255, 255, 128});
                         }
+                        if (neurons[selected_neuron].num_targets > 0) {
+                            int post = grid_cellpos_to_index(&grid, neurons[selected_neuron].target_center);;
+                            CellPos target_pos = {0};
+                            CellPos post_pos = {0};
+                            target_pos = grid_index_to_cellpos(&grid, selected_neuron, &target_pos);
+                            post_pos = grid_index_to_cellpos(&grid, post, &post_pos);
+                            Vector2 target_pos_xy = grid_cellpos_to_vec2(&grid, target_pos);
+                            Vector2 post_pos_xy = grid_cellpos_to_vec2(&grid, post_pos);
+                            target_pos_xy = Vector2Add(target_pos_xy, (Vector2){ grid.cellWidth/2, grid.cellHeight/2 });
+                            post_pos_xy = Vector2Add(post_pos_xy, (Vector2){ grid.cellWidth/2, grid.cellHeight/2 });
+                            DrawLineV(target_pos_xy, post_pos_xy, (Color){128, 255, 128, 128});
+                        }
+                        int K_far = neurons[selected_neuron].num_far_conn;
+                        for (int i = K_near; i < K_far+K_near; ++i) {
+                            int post = neurons[selected_neuron].outconn.targets[i];
+                            CellPos target_pos = neurons[selected_neuron].target_center;
+                            CellPos post_pos = {0};
+                            post_pos = grid_index_to_cellpos(&grid, post, &post_pos);
+                            Vector2 target_pos_xy = grid_cellpos_to_vec2(&grid, target_pos);
+                            Vector2 post_pos_xy = grid_cellpos_to_vec2(&grid, post_pos);
+                            target_pos_xy = Vector2Add(target_pos_xy, (Vector2){ grid.cellWidth/2, grid.cellHeight/2 });
+                            post_pos_xy = Vector2Add(post_pos_xy, (Vector2){ grid.cellWidth/2, grid.cellHeight/2 });
+                            DrawLineV(target_pos_xy, post_pos_xy, (Color){255, 255, 255, 128});
+                        }
+
+//                        for (int i = 0; i < K; ++i) {
+//                            int post = neurons[selected_neuron].outconn.targets[i];
+//                            CellPos target_pos = {0};
+//                            CellPos post_pos = {0};
+//                            target_pos = grid_index_to_cellpos(&grid, selected_neuron, &target_pos);
+//                            post_pos = grid_index_to_cellpos(&grid, post, &post_pos);
+//                            Vector2 this_cell_pos_xy = grid_cellpos_to_vec2(&grid, target_pos);
+//                            Vector2 post_cell_pos_xy = grid_cellpos_to_vec2(&grid, post_pos);
+//                            this_cell_pos_xy = Vector2Add(this_cell_pos_xy, (Vector2){ grid.cellWidth/2, grid.cellHeight/2 });
+//                            post_cell_pos_xy = Vector2Add(post_cell_pos_xy, (Vector2){ grid.cellWidth/2, grid.cellHeight/2 });
+//                            DrawLineV(this_cell_pos_xy, post_cell_pos_xy, (Color){255, 255, 255, 32});
+//                        }
                     }
                 }
                 if (graphics_raster) {
@@ -1178,7 +1243,7 @@ int main(void)
             int py = vy + vh + MARGIN;
             float mw = mean_exc_weight(&grid);
             char info[256];
-            snprintf(info, sizeof(info), "t=%d ms  mean_exc_weight=%.3f  steps/frame=%d  %s", t_ms, mw, steps_per_frame, paused ? "PAUSED" : "RUN");
+            snprintf(info, sizeof(info), "t=%d ms  mean_exc_weight=%.3f  steps/frame=%d  %s  || I:%f - I_prob:%f", t_ms, mw, steps_per_frame, paused ? "PAUSED" : "RUN", input_val, input_prob);
             DrawText(info, px+6, py+6, 14, WHITE);
 
             /* footer */
