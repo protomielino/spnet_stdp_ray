@@ -19,8 +19,8 @@
 ColourEntry *palette = NULL;
 
 /* Window */
-#define WIDTH 1360
-#define HEIGHT 768
+#define WIDTH 700
+#define HEIGHT 700
 
 //#define CE 75  /* excitatory outgoing per neuron */
 #define CI 25   /* inhibitory outgoing per neuron */
@@ -279,67 +279,6 @@ int* array_permute(int *arr, int N)
     return arr;
 }
 
-typedef struct
-{
-    long long rows;
-    long long cols;
-} gridFactors;
-
-gridFactors factors(long long num, double R)
-{
-    gridFactors ret = {0};
-
-    if (num <= 0) {
-        fprintf(stderr, "N deve essere positivo\n");
-        return ret;
-    }
-
-    double best_diff = INFINITY;
-    // Primo pass: trovare la differenza minima assoluta |(double)a/b - R|
-    for (long long col = 1; col * col <= num; ++col) {
-        if (num % col == 0) {
-            long long row = num / col;
-            double ratio1 = (double)col / (double)row;
-            double diff1 = fabs(ratio1 - R);
-            if (diff1 < best_diff)
-                best_diff = diff1;
-
-            // considerare anche la coppia invertita se diversa
-            if (col != row) {
-                double ratio2 = (double)row / (double)col;
-                double diff2 = fabs(ratio2 - R);
-                if (diff2 < best_diff)
-                    best_diff = diff2;
-            }
-        }
-    }
-
-    // Seconda pass: stampare tutte le coppie che raggiungono best_diff (tolleranza per fp)
-    const double eps = 1e-12;
-    printf("Fattori di %lld con rapporto vicino a %.12g (diff minima = %.12g):\n", num, R, best_diff);
-    for (long long col = 1; col * col <= num; ++col) {
-        if (num % col == 0) {
-            long long row = num / col;
-            double ratio1 = (double)col / (double)row;
-            double diff1 = fabs(ratio1 - R);
-            if (fabs(diff1 - best_diff) <= eps) {
-                printf("%lld x %lld  -> rapporto = %.12g\n", col, row, ratio1);
-            }
-            if (col != row) {
-                double ratio2 = (double)row / (double)col;
-                double diff2 = fabs(ratio2 - R);
-                if (fabs(diff2 - best_diff) <= eps) {
-                    printf("%lld x %lld  -> rapporto = %.12g\n", row, col, ratio2);
-                }
-            }
-            ret.cols = row;
-            ret.rows = col;
-        }
-    }
-
-    return ret;
-}
-
 static float mm_per_cell(Grid *grid)
 {
     const float R_mm = 8.0f;
@@ -446,8 +385,8 @@ static void init_network(Grid *grid)
 
         /* 1) local targets: usa annulus con rmin=0, rmax = radius_in_cells */
         float local_mm = is_exc ? local_exc_span_mm : inh_span_mm;
-        int cells_rmax_local = (int)ceilf(mm_to_cells_float(grid, local_mm)) + 1; // NOTE: this +1 should be removed for num neurons >= ~20.000
         int cells_rmin_local = 0;
+        int cells_rmax_local = (int)ceilf(mm_to_cells_float(grid, local_mm));
         CellPos *local_post = NULL;
         int need = is_exc ? exc_local_targets : inh_local_targets;
         arrsetlen(local_post, need);
@@ -478,7 +417,7 @@ static void init_network(Grid *grid)
         if (is_exc) {
             /* convert lengths to cells */
             int target_cell_dist = (int)roundf(mm_to_cells_float(grid, long_range_axon_length_mm));
-            int collateral_rcells = (int)ceilf(mm_to_cells_float(grid, collateral_radius_mm)) + 1; // NOTE: this +1 should be removed for num neurons >= ~20.000
+            int collateral_rcells = (int)ceilf(mm_to_cells_float(grid, collateral_radius_mm));
 
             /* troviamo candidate center cells a distanza target_cell_dist (annulus rmin=r-1,rmax=r+1) */
             CellPos *distant_targets = NULL;
@@ -1031,15 +970,15 @@ int main(int argc, char **argv)
     if (argc > 1)
         num_cells = atoi(argv[1]);
 
-    gridFactors gf = factors(num_cells, (double)grid_width/(double)grid_height);;
+    GridChoice gc = choose_grid(num_cells, grid_width, grid_height, false);
     Grid grid = {
-            .numCols = gf.cols,
-            .numRows = gf.rows,
-            .numCells = (gf.cols*gf.rows),
+            .numCols = gc.cols,
+            .numRows = gc.rows,
+            .numCells = (gc.cols*gc.rows),
             .width = grid_width,
             .height = grid_height,
-            .cellWidth = ((float)grid_width / (float)gf.cols),
-            .cellHeight = ((float)grid_height / (float)gf.rows)
+            .cellWidth = ((float)grid_width / (float)gc.cols),
+            .cellHeight = ((float)grid_height / (float)gc.rows)
     };
 
     Palette_init(&palette, STOCK_COLDHOT3);
