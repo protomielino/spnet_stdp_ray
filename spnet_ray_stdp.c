@@ -158,6 +158,9 @@ static int current_delay_index = 0;         /* rotates every ms */
 static FiringTime *firing_times = NULL;            /* circular buffer of pairs (time, neuron) */
 static int firing_count = 0;
 static int firing_cap = FIRING_BUF;
+static float *v_next = NULL;
+static float *u_next = NULL;
+static int *order = NULL;
 
 /* per-neuron v/u history index for selected trace (circular) */
 static int vhist_idx = 0;
@@ -443,7 +446,7 @@ static void init_network(Grid *grid)
 
         /* 1) local targets: usa annulus con rmin=0, rmax = radius_in_cells */
         float local_mm = is_exc ? local_exc_span_mm : inh_span_mm;
-        int cells_rmax_local = (int)ceilf(mm_to_cells_float(grid, local_mm)) + 1;
+        int cells_rmax_local = (int)ceilf(mm_to_cells_float(grid, local_mm)) + 1; // NOTE: this +1 should be removed for num neurons >= ~20.000
         int cells_rmin_local = 0;
         CellPos *local_post = NULL;
         int need = is_exc ? exc_local_targets : inh_local_targets;
@@ -475,7 +478,7 @@ static void init_network(Grid *grid)
         if (is_exc) {
             /* convert lengths to cells */
             int target_cell_dist = (int)roundf(mm_to_cells_float(grid, long_range_axon_length_mm));
-            int collateral_rcells = (int)ceilf(mm_to_cells_float(grid, collateral_radius_mm)) + 1;
+            int collateral_rcells = (int)ceilf(mm_to_cells_float(grid, collateral_radius_mm)) + 1; // NOTE: this +1 should be removed for num neurons >= ~20.000
 
             /* troviamo candidate center cells a distanza target_cell_dist (annulus rmin=r-1,rmax=r+1) */
             CellPos *distant_targets = NULL;
@@ -594,6 +597,9 @@ static void free_network(Grid *grid)
     }
     arrfree(delaybuckets);
     arrfree(neurons);
+    arrfree(order);
+    arrfree(v_next);
+    arrfree(u_next);
 }
 
 /* Add firing to circular buffer of pairs (time, neuron) */
@@ -710,8 +716,68 @@ static void sim_step(Grid *grid)
                 neurons[i].I += input_val * frandf();
     }
 
-    /* 3) Integrate neuron dynamics (Izhikevich) */
     int num_sub_steps = 2;
+
+#if 0
+    /* 3) Integrate: permuta deterministica dell'ordine */
+    if (!order)
+        arrsetlen(order, grid->numCells);
+    /* inizializza ordine una volta (0..N-1) */
+    for (int i = 0; i < grid->numCells; i++)
+        order[i] = i;
+    /* shuffle deterministico, ad es. xorshift con seed basato su t_ms */
+    uint32_t seed = (uint32_t)(t_ms + 123456);
+    for (int i = grid->numCells - 1; i > 0; --i) {
+        seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+        uint32_t r = seed % (i + 1);
+        int tmp = order[i];
+        order[i] = order[r];
+        order[r] = tmp;
+    }
+
+    /* due sottopassi: per ogni sottopasso aggiorna secondo order[] */
+    for (int step = 0; step < num_sub_steps; ++step) {
+        for (int idx = 0; idx < grid->numCells; ++idx) {
+            int i = order[idx];
+            float dv = 0.04f * neurons[i].v * neurons[i].v + 5.0f * neurons[i].v + 140.0f - neurons[i].u + neurons[i].I;
+            neurons[i].v += dv * (DT / (float)num_sub_steps);
+            neurons[i].u += neurons[i].a * (neurons[i].b * neurons[i].v - neurons[i].u) * (DT / (float)num_sub_steps);
+        }
+    }
+#endif
+#if 1
+    /* 3) Integrate neuron dynamics (Izhikevich) — versione buffer */
+    if (!v_next) {
+        arrsetlen(v_next, grid->numCells);
+        arrsetlen(u_next, grid->numCells);
+    }
+    /* inizializza con valori correnti (necessario per sottopassi) */
+    for (int i = 0; i < grid->numCells; i++) {
+        v_next[i] = neurons[i].v;
+        u_next[i] = neurons[i].u;
+    }
+
+    for (int step = 0; step < num_sub_steps; ++step) {
+        /* calcola nuovi v/u su base dei valori *correnti* in neurons[] */
+        for (int i = 0; i < grid->numCells; i++) {
+            float v_cur = neurons[i].v;
+            float u_cur = neurons[i].u;
+            float I = neurons[i].I;
+            float dv = 0.04f * v_cur * v_cur + 5.0f * v_cur + 140.0f - u_cur + I;
+            float v_new = v_cur + dv * (DT / (float)num_sub_steps);
+            float u_new = u_cur + neurons[i].a * (neurons[i].b * v_cur - u_cur) * (DT / (float)num_sub_steps);
+            v_next[i] = v_new;
+            u_next[i] = u_new;
+        }
+        /* dopo aver calcolato tutti i nuovi valori, copia indietro (swap) */
+        for (int i = 0; i < grid->numCells; i++) {
+            neurons[i].v = v_next[i];
+            neurons[i].u = u_next[i];
+        }
+    }
+#endif
+#if 0
+    /* 3) Integrate neuron dynamics (Izhikevich) — versione naive (drifting bias) */
     for (int step = 0; step < num_sub_steps; ++step) {
         for (int i = 0; i < grid->numCells; i++) {
             float dv = 0.04f * neurons[i].v * neurons[i].v + 5.0f * neurons[i].v + 140.0f - neurons[i].u + neurons[i].I;
@@ -719,6 +785,7 @@ static void sim_step(Grid *grid)
             neurons[i].u += neurons[i].a * (neurons[i].b * neurons[i].v - neurons[i].u) * (DT / (float)num_sub_steps);
         }
     }
+#endif
 
     /* 4) Check for spikes (v >= 30) */
     for (int i = 0; i < grid->numCells; i++) {
@@ -1264,7 +1331,7 @@ int main(int argc, char **argv)
             int py = vy + vh + MARGIN;
             float mw = mean_exc_weight(&grid);
             char info[256];
-            snprintf(info, sizeof(info), "t=%d ms  mean_exc_weight=%.3f  steps/frame=%d  %s  || I:%f - I_prob:%f", t_ms, mw, steps_per_frame, paused ? "PAUSED" : "RUN", input_val, input_prob);
+            snprintf(info, sizeof(info), "t=%d ms  mean_exc_weight=%.3f  steps/frame=%d  %s  ||  I=%.1f  I_prob=%.2f", t_ms, mw, steps_per_frame, paused ? "PAUSED" : "RUN", input_val, input_prob);
             DrawText(info, px+6, py+6, 14, WHITE);
 
             /* footer */
