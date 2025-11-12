@@ -261,3 +261,27 @@ int grid_in_annulus(Grid *grid, CellPos cell, CellPos center_cell, int rmin, int
     return (dsq >= rmin*rmin && dsq <= rmax*rmax);
 }
 
+float mm_per_cell(Grid *grid)
+{
+    const float R_mm = 8.0f;
+    const float area_mm2 = 4.0f * 3.14159265358979323846f * R_mm * R_mm;
+    const float mm2_per_cell = area_mm2 / (float)grid->numCells;
+    return sqrtf(mm2_per_cell);
+}
+
+float mm_to_cells_float(Grid *grid, float mm)
+{
+    return mm / mm_per_cell(grid);
+}
+
+unsigned char compute_delay_from_cells(Grid *grid, int cell_dist, float velocity_m_per_s)
+{
+    float dist_mm = cell_dist * mm_per_cell(grid);
+    float dist_m = dist_mm / 1000.0f;
+    float d_ms = (dist_m / velocity_m_per_s) * 1000.0f;
+    int di = (int)ceilf(d_ms);
+    if (di < 1) di = 1;
+    if (di > MAX_DELAY) di = MAX_DELAY;
+    return (unsigned char)di;
+}
+

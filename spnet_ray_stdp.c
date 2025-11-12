@@ -20,10 +20,9 @@
 ColourEntry *palette = NULL;
 
 /* Window */
-#define WIDTH 700
+#define WIDTH 1200
 #define HEIGHT 700
 
-#define MAX_DELAY 20 /* ms */
 #define DT 1         /* ms per sim step */
 
 /* Visualization layout */
@@ -137,30 +136,6 @@ int* array_permute(int *arr, int N)
         arr[j] = tmp;
     }
     return arr;
-}
-
-static float mm_per_cell(Grid *grid)
-{
-    const float R_mm = 8.0f;
-    const float area_mm2 = 4.0f * 3.14159265358979323846f * R_mm * R_mm;
-    const float mm2_per_cell = area_mm2 / (float)grid->numCells;
-    return sqrtf(mm2_per_cell);
-}
-
-static float mm_to_cells_float(Grid *grid, float mm)
-{
-    return mm / mm_per_cell(grid);
-}
-
-static unsigned char compute_delay_from_cells(Grid *grid, int cell_dist, float velocity_m_per_s)
-{
-    float dist_mm = cell_dist * mm_per_cell(grid);
-    float dist_m = dist_mm / 1000.0f;
-    float d_ms = (dist_m / velocity_m_per_s) * 1000.0f;
-    int di = (int)ceilf(d_ms);
-    if (di < 1) di = 1;
-    if (di > MAX_DELAY) di = MAX_DELAY;
-    return (unsigned char)di;
 }
 
 /* Initialize network (connections, weights, delays, v/u, buffers) */
@@ -488,8 +463,8 @@ static void schedule_spike_delivery(int pre, int conn_index)
     bucket_push(&delaybuckets[bucket_idx], post, w);
 }
 
-static float input_prob = 0.01f;    // default synaptic input noise probability
-static float input_val = 24.0f;     // default synaptic input current
+static float input_prob = 0.08f;    // default synaptic input noise probability
+static float input_val = 17.0f;     // default synaptic input current
 
 /* Simulation single step (1 ms) */
 static void sim_step(Grid *grid)
@@ -804,7 +779,7 @@ int main(int argc, char **argv)
 
     int grid_width = (WIDTH - 2*grid.margin);
     int grid_height = (HEIGHT - 2*grid.margin);
-    int num_cells = 1000;
+    int num_cells = 5000;
     if (argc > 1)
         num_cells = atoi(argv[1]);
 
@@ -817,7 +792,8 @@ int main(int argc, char **argv)
             .height = grid_height,
             .cellWidth = ((float)grid_width / (float)gc.cols),
             .cellHeight = ((float)grid_height / (float)gc.rows),
-            .margin = 20
+            .margin = 20,
+            .selected_cell = -1
     };
 
     Palette_init(&palette, STOCK_COLDHOT3);
@@ -1026,14 +1002,24 @@ int main(int argc, char **argv)
                         float y = ry + ((float)(ft - display_start) / window_ms) * rh;
                         Color pc = neurons[nid].is_exc ? GREEN : DARKGREEN;
                         pc.a = 150;
-                        DrawRectangle((int)x-1, (int)y-1, 2, 2, pc);
+
+                        float dot_radius = 0.0;
+                        if (grid.numCells > grid.width) {
+                            DrawPixel(x, y, pc);
+                            dot_radius = 1.5;
+                        } else {
+                            DrawRectangle(x - 1, y - 1, 2, 2, pc);
+                            dot_radius = 3.0;
+                        }
+
+
                         if (nid == grid.selected_cell)
-                            DrawCircle((int)x, (int)y, 3, YELLOW);
+                            DrawCircle(x, y, 3, YELLOW);
                         if ((ft < t_ms) && (ft > t_ms - 10)) {
                             if (neurons[nid].is_exc ) {
-                                DrawCircle((int)x, (int)y, 3, WHITE);
+                                DrawCircle(x, y, dot_radius, WHITE);
                             } else {
-                                DrawCircle((int)x, (int)y, 3, RED);
+                                DrawCircle(x, y, dot_radius, RED);
                             }
                         }
                     }
@@ -1064,9 +1050,17 @@ int main(int argc, char **argv)
                         int x = vx + (int)((float)idx / (float)M * vw);
                         int y = vy + 20 + (int)((1.0f - norm) * (vh - 40));
                         Color col = neurons[i].is_exc ? GREEN: DARKGREEN;
-                        DrawRectangle(x-1, y-1, 2, 2, col);
+
+                        float dot_radius = 0.0;
+                        if (grid.numCells > grid.width) {
+                            DrawPixel(x, y, col);
+                            dot_radius = 2;
+                        } else {
+                            DrawRectangle(x-1, y-1, 2, 2, col);
+                            dot_radius = 3.0;
+                        }
                         if (i == grid.selected_cell)
-                            DrawCircle(x, y, 3, YELLOW);
+                            DrawCircle(x, y, dot_radius, YELLOW);
                     }
 
                     /* mean weight panel */

@@ -5,6 +5,9 @@
 
 #include <raylib.h>
 
+// TEMPORANEO: da spostare in "sim" possibilmente.
+#define MAX_DELAY 20 /* ms */
+
 typedef struct
 {
     int numCols;
@@ -46,6 +49,8 @@ CellPos grid_index_to_cellpos(Grid *grid, int idx, CellPos *cell);
 int grid_cellpos_to_index(Grid *grid, CellPos cell);
 Vector2 grid_cellpos_to_vec2(Grid *grid, CellPos cp);
 int cell_index_from_grid_click(Grid *grid, int click_x, int click_y, int rx, int ry, int rw, int rh);
-
+float mm_per_cell(Grid *grid);
+float mm_to_cells_float(Grid *grid, float mm);
+unsigned char compute_delay_from_cells(Grid *grid, int cell_dist, float velocity_m_per_s);
 
 #endif /* GRID_H_ */
