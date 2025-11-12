@@ -12,6 +12,7 @@
 #define STB_DS_IMPLEMENTATION
 #include "stb_ds.h"
 
+#include "math_utils.h"
 #include "grid.h"
 #include "palette.h"
 #include "neuron.h"
@@ -22,41 +23,14 @@ ColourEntry *palette = NULL;
 #define WIDTH 700
 #define HEIGHT 700
 
-//#define CE 75  /* excitatory outgoing per neuron */
-#define CI 25   /* inhibitory outgoing per neuron */
-
 #define MAX_DELAY 20 /* ms */
 #define DT 1         /* ms per sim step */
 
 /* Visualization layout */
-#define MARGIN 20
-
 #define RASTER_H 350
 #define VTRACE_H 110
 #define PANEL_H 50
 #define SELECT_TRACE_H 100
-
-typedef struct
-{
-    int numCols;
-    int numRows;
-    int numCells; // this number needs to be == N == NE+NI
-    int width; // pixel
-    int height; // pixel
-    float cellWidth; // pixel
-    float cellHeight; // pixel
-} Grid;
-
-float rand01()
-{
-    return (float)rand() / (float)RAND_MAX;
-}
-
-uint f_randi(uint32_t index)
-{
-    index = (index << 13) ^ index;
-    return ((index * (index * index * 15731 + 789221) + 1376312589) & 0x7fffffff);
-}
 
 /* Delay queues: for each delay (1..MAX_DELAY) maintain list of targets arriving after that many ms */
 typedef struct
@@ -66,71 +40,6 @@ typedef struct
     int count;
     int cap;
 } DelayBucket;
-
-int grid_toroidal_dist_sq(Grid *grid, CellPos cell1, CellPos cell2)
-{
-    // distanza al quadrato considerando wrap-around (toroide) con metriche di griglia euclidea
-    int dr = abs(cell1.r - cell2.r);
-    int dc = abs(cell1.c - cell2.c);
-    if (dr > grid->numRows/2) dr = grid->numRows - dr;
-    if (dc > grid->numCols/2) dc = grid->numCols - dc;
-    return dr*dr + dc*dc;
-}
-
-// Restituisce 1 se la cella (r,c) è in [rmin,rmax] (inclusi) rispetto a centro (rc,cc)
-int grid_in_annulus(Grid *grid, CellPos cell, CellPos center_cell, int rmin, int rmax)
-{
-    int dsq = grid_toroidal_dist_sq(grid, cell, center_cell);
-    return (dsq >= rmin*rmin && dsq <= rmax*rmax);
-}
-
-// Seleziona k celle casuali nell'anello [rmin,rmax] attorno al centro.
-// Restituisce il numero effettivo di celle selezionate (<= k)
-// out array deve avere capacità almeno k.
-int grid_pick_random_cells_in_annulus(Grid *grid, CellPos center_cell, int rmin, int rmax, int k, CellPos *out)
-{
-    // Raccogli tutte le celle ammissibili
-    CellPos *candidates = NULL;
-    int cnt = 0;
-    for (int r = 0; r < grid->numRows; r++) {
-        for (int c = 0; c < grid->numCols; c++) {
-            if (grid_in_annulus(grid, (CellPos){r, c}, center_cell, rmin, rmax)) {
-                CellPos cand = {r, c};
-                arrput(candidates, cand);
-            }
-        }
-    }
-    cnt = arrlen(candidates);
-    if (cnt == 0) {
-        arrfree(candidates);
-        candidates = NULL;
-        return 0;
-    }
-
-    // Se k >= cnt prendiamo tutti
-    if (k >= cnt) {
-        for (int i = 0; i < cnt; i++)
-            out[i] = candidates[i];
-        arrfree(candidates);
-        candidates = NULL;
-        return cnt;
-    }
-
-    // altrimenti fisher-yates partial shuffle per estrarre k elementi casuali senza ripetizioni
-    for (int i = 0; i < k; i++) {
-        int j = i + rand() % (cnt - i);
-        // scambia i,j
-        CellPos tmp = candidates[i];
-        candidates[i] = candidates[j];
-        candidates[j] = tmp;
-        out[i] = candidates[i];
-    }
-
-    arrfree(candidates);
-    candidates = NULL;
-
-    return k;
-}
 
 /* Raster storage */
 #define FIRING_BUF 2000000 /* pair (time, neuron) capacity */
@@ -166,57 +75,8 @@ static int *order = NULL;
 static int vhist_idx = 0;
 static int uhist_idx = 0;
 
-/* Selected neuron */
-static int selected_neuron = -1;
-
 /* Simulation time */
 static int t_ms = 0;
-
-float map(float input, float input_start, float input_end, float output_start, float output_end)
-{
-    float slope = 1.0 * (output_end - output_start) / (input_end - input_start);
-    float output = output_start + slope * (input - input_start);
-    return output;
-}
-
-/* Utility random */
-static float frandf()
-{
-    return (float)rand() / (float)RAND_MAX;
-}
-
-/* Clamp helper */
-static float clampf(float x, float a, float b)
-{
-    if (x < a)
-        return a;
-    if (x > b)
-        return b;
-    return x;
-}
-
-/* helper: convert index -> row,col and viceversa */
-static inline CellPos grid_index_to_cellpos(Grid *grid, int idx, CellPos *cell)
-{
-    *cell = (CellPos){idx / grid->numCols, idx % grid->numCols};
-    return *cell;
-}
-static inline int grid_cellpos_to_index(Grid *grid, CellPos cell)
-{
-    if (cell.r < 0)
-        cell.r = (cell.r % grid->numRows + grid->numRows) % grid->numRows;
-    if (cell.c < 0)
-        cell.c = (cell.c % grid->numCols + grid->numCols) % grid->numCols;
-    return cell.r * grid->numCols + cell.c;
-}
-/* helper: convert row,col -> x,y (cell's top left+MARGIN) */
-static inline Vector2 grid_cellpos_to_vec2(Grid *grid, CellPos cp)
-{
-    Vector2 ret = {0};
-    ret.x = MARGIN + cp.c * grid->cellWidth;
-    ret.y = MARGIN + cp.r * grid->cellHeight;
-    return ret;
-}
 
 /* Initialize delay buckets */
 static void init_delay_buckets()
@@ -514,7 +374,7 @@ static void init_network(Grid *grid)
     firing_count = 0;
     t_ms = 0;
     vhist_idx = 0;
-    selected_neuron = -1;
+    grid->selected_cell = -1;
 
     free(flags);
 }
@@ -658,6 +518,16 @@ static void sim_step(Grid *grid)
     int num_sub_steps = 2;
 
 #if 0
+    /* 3) Integrate neuron dynamics (Izhikevich) — versione naive (drifting bias) */
+    for (int step = 0; step < num_sub_steps; ++step) {
+        for (int i = 0; i < grid->numCells; i++) {
+            float dv = 0.04f * neurons[i].v * neurons[i].v + 5.0f * neurons[i].v + 140.0f - neurons[i].u + neurons[i].I;
+            neurons[i].v += dv * (DT / (float)num_sub_steps);
+            neurons[i].u += neurons[i].a * (neurons[i].b * neurons[i].v - neurons[i].u) * (DT / (float)num_sub_steps);
+        }
+    }
+#endif
+#if 0
     /* 3) Integrate: permuta deterministica dell'ordine */
     if (!order)
         arrsetlen(order, grid->numCells);
@@ -712,16 +582,6 @@ static void sim_step(Grid *grid)
         for (int i = 0; i < grid->numCells; i++) {
             neurons[i].v = v_next[i];
             neurons[i].u = u_next[i];
-        }
-    }
-#endif
-#if 0
-    /* 3) Integrate neuron dynamics (Izhikevich) — versione naive (drifting bias) */
-    for (int step = 0; step < num_sub_steps; ++step) {
-        for (int i = 0; i < grid->numCells; i++) {
-            float dv = 0.04f * neurons[i].v * neurons[i].v + 5.0f * neurons[i].v + 140.0f - neurons[i].u + neurons[i].I;
-            neurons[i].v += dv * (DT / (float)num_sub_steps);
-            neurons[i].u += neurons[i].a * (neurons[i].b * neurons[i].v - neurons[i].u) * (DT / (float)num_sub_steps);
         }
     }
 #endif
@@ -795,43 +655,18 @@ static int neuron_from_raster_click(Grid *grid, int click_x, int click_y, int rx
     return nid;
 }
 
-/* Find neuron by clicking raster: map x,y to time and neuron id */
-static int cell_index_from_grid_click(Grid *grid, int click_x, int click_y, int rx, int ry, int rw, int rh)
-{
-    int rel_x = click_x - rx;
-    int rel_y = click_y - ry;
-
-    /* If click outside grid area return -1 */
-    if (click_x <= rx || click_x >= rx+rw || click_y <= ry || click_y >= ry+rh)
-        return -1;
-
-    CellPos cell = {
-            map(rel_y, 0, grid->height, 0, grid->numRows),
-            map(rel_x, 0, grid->width,  0, grid->numCols)
-    };
-
-    int cell_idx = cell.r * grid->numCols + cell.c;
-
-    if (cell_idx < 0)
-        cell_idx = 0;
-    if (cell_idx >= grid->numCells)
-        cell_idx = grid->numCells-1;
-
-    return cell_idx;
-}
-
 bool graphics_raster = true;
 bool graphics_grid = false;
 
 /* Draw selected neuron v(t) trace */
-static void draw_selected_trace(int sx, int sy, int sw, int sh)
+static void draw_selected_trace(Grid *grid, int sx, int sy, int sw, int sh)
 {
-    if (selected_neuron < 0) {
+    if (grid->selected_cell < 0) {
         DrawText(TextFormat("No neuron selected. Click %s to select.", (graphics_raster==true)?"raster":"grid"), sx+10, sy+10, 14, GRAY);
         return;
     }
     char buf[128];
-    snprintf(buf, sizeof(buf), "Neuron %d  v,u(t) last %d ms", selected_neuron, VUBUF_LEN_MS);
+    snprintf(buf, sizeof(buf), "Neuron %d  v,u(t) last %d ms", grid->selected_cell, VUBUF_LEN_MS);
     DrawText(buf, sx+10, sy+10, 14, LIGHTGRAY);
 
     /* draw outline */
@@ -848,8 +683,8 @@ static void draw_selected_trace(int sx, int sy, int sw, int sh)
         while (pos < 0)
             pos += VUBUF_LEN_MS;
         pos %= VUBUF_LEN_MS;
-        vv = neurons[selected_neuron].v_hist[pos];
-        uu = neurons[selected_neuron].u_hist[pos];
+        vv = neurons[grid->selected_cell].v_hist[pos];
+        uu = neurons[grid->selected_cell].u_hist[pos];
         /* map vv (-100..40) to y */
         float vnorm = (vv + 100.0f) / 140.0f;
         float unorm = (uu + 100.0f) / 140.0f;
@@ -860,8 +695,8 @@ static void draw_selected_trace(int sx, int sy, int sw, int sh)
         float x = sx + 1 + ((float)k / (float)(VUBUF_LEN_MS-1) * (float)(sw-2));
         float vy = sy + 1 + 10 + ((1.0f - vnorm) * (sh - 20));
         float uy = sy + 1 + 10 + ((1.0f - unorm) * (sh - 20));
-        Color vC = neurons[selected_neuron].is_exc ? GREEN : DARKGREEN;
-        Color uC = neurons[selected_neuron].is_exc ? SKYBLUE : BLUE;
+        Color vC = neurons[grid->selected_cell].is_exc ? GREEN : DARKGREEN;
+        Color uC = neurons[grid->selected_cell].is_exc ? SKYBLUE : BLUE;
         if (k > 0) {
             DrawLine(vpx_prev, vpy_prev, x, vy, vC);
             DrawLine(upx_prev, upy_prev, x, uy, uC);
@@ -912,16 +747,16 @@ void grid_show(Grid *grid)
             int idx = grid_cellpos_to_index(grid, (CellPos){r, c});
             float val = neurons[idx].cell_activity;
             Color col = Palette_Sample(&palette, val);
-            int x = MARGIN + (float)c * grid->cellWidth;
-            int y = MARGIN + (float)r * grid->cellHeight;
+            int x = grid->margin + (float)c * grid->cellWidth;
+            int y = grid->margin + (float)r * grid->cellHeight;
             DrawRectangle(x+1, y+1, grid->cellWidth - 1, grid->cellHeight - 1, col);
-            if (idx == selected_neuron) {
+            if (idx == grid->selected_cell) {
                 DrawRectangleLines(x, y, grid->cellWidth, grid->cellHeight, MAGENTA);
             }
         }
     }
 
-    DrawRectangleLines(MARGIN, MARGIN, grid->width, grid->height, WHITE);
+    DrawRectangleLines(grid->margin, grid->margin, grid->width, grid->height, WHITE);
 
     // overlay UI text
 //    DrawText("Controls: P Pause | R Reset | +/- Speed | 1 AMPA 2 NMDA 3 GABAA 4 GABAB", 10, 8, 18, WHITE);
@@ -964,21 +799,25 @@ int main(int argc, char **argv)
 {
     srand((unsigned)time(NULL));
 
-    int grid_width = (WIDTH - 2*MARGIN);
-    int grid_height = (HEIGHT - 2*MARGIN);
+    Grid grid = {0};
+    grid.margin = 20;
+
+    int grid_width = (WIDTH - 2*grid.margin);
+    int grid_height = (HEIGHT - 2*grid.margin);
     int num_cells = 1000;
     if (argc > 1)
         num_cells = atoi(argv[1]);
 
-    GridChoice gc = choose_grid(num_cells, grid_width, grid_height, false);
-    Grid grid = {
+    GridChoice gc = grid_choose(num_cells, grid_width, grid_height, false);
+    grid = (Grid){
             .numCols = gc.cols,
             .numRows = gc.rows,
             .numCells = (gc.cols*gc.rows),
             .width = grid_width,
             .height = grid_height,
             .cellWidth = ((float)grid_width / (float)gc.cols),
-            .cellHeight = ((float)grid_height / (float)gc.rows)
+            .cellHeight = ((float)grid_height / (float)gc.rows),
+            .margin = 20
     };
 
     Palette_init(&palette, STOCK_COLDHOT3);
@@ -1039,23 +878,23 @@ int main(int argc, char **argv)
         if (IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
             if (graphics_raster) {
                 /* raster area coords */
-                int rx = MARGIN;
-                int ry = MARGIN;
-                int rw = WIDTH - 2*MARGIN;
+                int rx = grid.margin;
+                int ry = grid.margin;
+                int rw = WIDTH - 2*grid.margin;
                 int rh = RASTER_H;
 
                 int nid = neuron_from_raster_click(&grid, mx, my, rx, ry, rw, rh);
-                selected_neuron = (nid >= 0) ? nid : -1;
+                grid.selected_cell = (nid >= 0) ? nid : -1;
             }
             if (graphics_grid) {
                 /* grid area coords */
-                int rx = MARGIN;
-                int ry = MARGIN;
+                int rx = grid.margin;
+                int ry = grid.margin;
                 int rw = grid.width;
                 int rh = grid.height;
 
                 int nid = cell_index_from_grid_click(&grid, mx, my, rx, ry, rw, rh);
-                selected_neuron = (nid >= 0) ? nid : -1;
+                grid.selected_cell = (nid >= 0) ? nid : -1;
             }
         }
 
@@ -1075,12 +914,12 @@ int main(int argc, char **argv)
                     grid_show(&grid);
 
 //                    // evidenzia celle disponibili nell'anello (trasparente)
-//                    for (int ni = 0; ni < grid->numCells; ++ni) {
+//                    for (int ni = 0; ni < grid.numCells; ++ni) {
 //                        CellPos cell_rc = {0};
 //                        cell_rc = index_to_cellpos(ni, &cell_rc.r, &cell_rc.c);
 //                        if (in_annulus(cell_rc.r, cell_rc.c, center, rmin, rmax)) {
 //                            Vector2 cell_xy = cellpos_to_vec2(cell_rc);
-//                            DrawRectangleLines(cell_xy.x+1, cell_xy.y+1, grid->cellWidth - 2, grid->cellHeight - 2, (Color){200, 230, 255, 255});
+//                            DrawRectangleLines(cell_xy.x+1, cell_xy.y+1, grid.cellWidth - 2, grid.cellHeight - 2, (Color){200, 230, 255, 255});
 //                        }
 //                    }
 //
@@ -1090,34 +929,34 @@ int main(int argc, char **argv)
 //                        cp.r = selected[i].r;
 //                        cp.c = selected[i].c;
 //                        Vector2 xy = cellpos_to_vec2(cp);
-//                        DrawRectangleLines(xy.x+2, xy.y+2, grid->cellWidth-4, grid->cellHeight-4, (Color){ 253, 249, 0, 255 });
+//                        DrawRectangleLines(xy.x+2, xy.y+2, grid.cellWidth-4, grid.cellHeight-4, (Color){ 253, 249, 0, 255 });
 //                    }
 
-                    if (selected_neuron >= 0) {
+                    if (grid.selected_cell >= 0) {
                         /* selected neuron trace */
                         int sx;
-                        int sy = my + MARGIN/2;
+                        int sy = my + grid.margin/2;
                         int sw;
                         int sh = SELECT_TRACE_H-10;
                         if (mx < WIDTH/2) {
-                            sx = mx + MARGIN;
-                            sw = WIDTH - 2*MARGIN - mx;
+                            sx = mx + grid.margin;
+                            sw = WIDTH - 2*grid.margin - mx;
                         } else {
-                            sx = MARGIN;
-                            sw = mx - 2*MARGIN;
+                            sx = grid.margin;
+                            sw = mx - 2*grid.margin;
                         }
 
-                        draw_selected_trace(sx, sy, sw, sh);
+                        draw_selected_trace(&grid, sx, sy, sw, sh);
                     }
 
-                    if (selected_neuron >= 0) {
+                    if (grid.selected_cell >= 0) {
                         /* only excitatory neurons have CE */
-                        int K_near = neurons[selected_neuron].num_near_conn;
+                        int K_near = neurons[grid.selected_cell].num_near_conn;
                         for (int i = 0; i < K_near; ++i) {
-                            int post = neurons[selected_neuron].outconn.targets[i];
+                            int post = neurons[grid.selected_cell].outconn.targets[i];
                             CellPos target_pos = {0};
                             CellPos post_pos = {0};
-                            target_pos = grid_index_to_cellpos(&grid, selected_neuron, &target_pos);
+                            target_pos = grid_index_to_cellpos(&grid, grid.selected_cell, &target_pos);
                             post_pos = grid_index_to_cellpos(&grid, post, &post_pos);
                             Vector2 target_pos_xy = grid_cellpos_to_vec2(&grid, target_pos);
                             Vector2 post_pos_xy = grid_cellpos_to_vec2(&grid, post_pos);
@@ -1125,11 +964,11 @@ int main(int argc, char **argv)
                             post_pos_xy = Vector2Add(post_pos_xy, (Vector2){ grid.cellWidth/2, grid.cellHeight/2 });
                             DrawLineV(target_pos_xy, post_pos_xy, (Color){255, 255, 255, 64});
                         }
-                        if (neurons[selected_neuron].num_targets > 0) {
-                            int post = grid_cellpos_to_index(&grid, neurons[selected_neuron].target_center);;
+                        if (neurons[grid.selected_cell].num_targets > 0) {
+                            int post = grid_cellpos_to_index(&grid, neurons[grid.selected_cell].target_center);;
                             CellPos target_pos = {0};
                             CellPos post_pos = {0};
-                            target_pos = grid_index_to_cellpos(&grid, selected_neuron, &target_pos);
+                            target_pos = grid_index_to_cellpos(&grid, grid.selected_cell, &target_pos);
                             post_pos = grid_index_to_cellpos(&grid, post, &post_pos);
                             Vector2 target_pos_xy = grid_cellpos_to_vec2(&grid, target_pos);
                             Vector2 post_pos_xy = grid_cellpos_to_vec2(&grid, post_pos);
@@ -1137,10 +976,10 @@ int main(int argc, char **argv)
                             post_pos_xy = Vector2Add(post_pos_xy, (Vector2){ grid.cellWidth/2, grid.cellHeight/2 });
                             DrawLineV(target_pos_xy, post_pos_xy, (Color){128, 255, 128, 64});
                         }
-                        int K_far = neurons[selected_neuron].num_far_conn;
+                        int K_far = neurons[grid.selected_cell].num_far_conn;
                         for (int i = K_near; i < K_far+K_near; ++i) {
-                            int post = neurons[selected_neuron].outconn.targets[i];
-                            CellPos target_pos = neurons[selected_neuron].target_center;
+                            int post = neurons[grid.selected_cell].outconn.targets[i];
+                            CellPos target_pos = neurons[grid.selected_cell].target_center;
                             CellPos post_pos = {0};
                             post_pos = grid_index_to_cellpos(&grid, post, &post_pos);
                             Vector2 target_pos_xy = grid_cellpos_to_vec2(&grid, target_pos);
@@ -1151,10 +990,10 @@ int main(int argc, char **argv)
                         }
 
 //                        for (int i = 0; i < K; ++i) {
-//                            int post = neurons[selected_neuron].outconn.targets[i];
+//                            int post = neurons[grid.selected_cell].outconn.targets[i];
 //                            CellPos target_pos = {0};
 //                            CellPos post_pos = {0};
-//                            target_pos = grid_index_to_cellpos(&grid, selected_neuron, &target_pos);
+//                            target_pos = grid_index_to_cellpos(&grid, grid.selected_cell, &target_pos);
 //                            post_pos = grid_index_to_cellpos(&grid, post, &post_pos);
 //                            Vector2 this_cell_pos_xy = grid_cellpos_to_vec2(&grid, target_pos);
 //                            Vector2 post_cell_pos_xy = grid_cellpos_to_vec2(&grid, post_pos);
@@ -1166,9 +1005,9 @@ int main(int argc, char **argv)
                 }
                 if (graphics_raster) {
                     /* Raster */
-                    int rx = MARGIN;
-                    int ry = MARGIN;
-                    int rw = WIDTH - 2*MARGIN;
+                    int rx = grid.margin;
+                    int ry = grid.margin;
+                    int rw = WIDTH - 2*grid.margin;
                     int rh = RASTER_H;
                     DrawRectangleLines(rx-1, ry-1, rw+2, rh+2, LIGHTGRAY);
                     DrawText("Raster (last 2000 ms)", rx+6, ry+6, 14, LIGHTGRAY);
@@ -1188,7 +1027,7 @@ int main(int argc, char **argv)
                         Color pc = neurons[nid].is_exc ? GREEN : DARKGREEN;
                         pc.a = 150;
                         DrawRectangle((int)x-1, (int)y-1, 2, 2, pc);
-                        if (nid == selected_neuron)
+                        if (nid == grid.selected_cell)
                             DrawCircle((int)x, (int)y, 3, YELLOW);
                         if ((ft < t_ms) && (ft > t_ms - 10)) {
                             if (neurons[nid].is_exc ) {
@@ -1200,9 +1039,9 @@ int main(int argc, char **argv)
                     }
 
                     /* v snapshot */
-                    int vx = MARGIN;
-                    int vy = ry + rh + MARGIN;
-                    int vw = WIDTH - 2*MARGIN;
+                    int vx = grid.margin;
+                    int vy = ry + rh + grid.margin;
+                    int vw = WIDTH - 2*grid.margin;
                     int vh = VTRACE_H;
                     DrawRectangleLines(vx-1, vy-1, vw+2, vh+2, LIGHTGRAY);
                     DrawText("v snapshot (sampled neurons)", vx+6, vy+6, 14, LIGHTGRAY);
@@ -1226,13 +1065,13 @@ int main(int argc, char **argv)
                         int y = vy + 20 + (int)((1.0f - norm) * (vh - 40));
                         Color col = neurons[i].is_exc ? GREEN: DARKGREEN;
                         DrawRectangle(x-1, y-1, 2, 2, col);
-                        if (i == selected_neuron)
+                        if (i == grid.selected_cell)
                             DrawCircle(x, y, 3, YELLOW);
                     }
 
                     /* mean weight panel */
-                    int px = MARGIN, py = vy + vh + MARGIN;
-                    int pw = WIDTH - 2*MARGIN;
+                    int px = grid.margin, py = vy + vh + grid.margin;
+                    int pw = WIDTH - 2*grid.margin;
                     int ph = PANEL_H;
                     DrawRectangleLines(px-1, py-1, pw+2, ph+2, LIGHTGRAY);
                     float mw = mean_exc_weight(&grid);
@@ -1251,30 +1090,30 @@ int main(int argc, char **argv)
                             GREEN);
 
                     /* selected neuron trace */
-                    int sx = MARGIN;
-                    int sy = py + ph + MARGIN;
-                    int sw = WIDTH - 2*MARGIN;
+                    int sx = grid.margin;
+                    int sy = py + ph + grid.margin;
+                    int sw = WIDTH - 2*grid.margin;
                     int sh = SELECT_TRACE_H-10;
                     DrawRectangleLines(sx-1, sy-1, sw+2, sh+2, LIGHTGRAY);
-                    draw_selected_trace(sx, sy, sw, sh);
+                    draw_selected_trace(&grid, sx, sy, sw, sh);
                 }
             }
 
             /* infos */
-            int ry = MARGIN;
+            int ry = grid.margin;
             int rh = RASTER_H;
-            int vy = ry + rh + MARGIN;
+            int vy = ry + rh + grid.margin;
             int vh = VTRACE_H;
 
-            int px = MARGIN;
-            int py = vy + vh + MARGIN;
+            int px = grid.margin;
+            int py = vy + vh + grid.margin;
             float mw = mean_exc_weight(&grid);
             char info[256];
             snprintf(info, sizeof(info), "t=%d ms  mean_exc_weight=%.3f  steps/frame=%d  %s  ||  I=%.1f  I_prob=%.2f", t_ms, mw, steps_per_frame, paused ? "PAUSED" : "RUN", input_val, input_prob);
             DrawText(info, px+6, py+6, 14, WHITE);
 
             /* footer */
-            DrawText(TextFormat("SPACE: pause/run   UP/DOWN: +/- speed   D: display   G: raster<>grid   R: reset   Click %s to select neuron", graphics_raster?"raster":"grid"), MARGIN+5, HEIGHT-15, 14, GRAY);
+            DrawText(TextFormat("SPACE: pause/run   UP/DOWN: +/- speed   D: display   G: raster<>grid   R: reset   Click %s to select neuron", graphics_raster?"raster":"grid"), grid.margin+5, HEIGHT-15, 14, GRAY);
 
             if (show_fps)
                 DrawFPS(10, 10);
