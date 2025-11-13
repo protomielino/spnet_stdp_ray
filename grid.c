@@ -8,8 +8,9 @@
 
 #include "stb_ds.h"
 
-#include "grid.h"
 #include "math_utils.h"
+#include "grid.h"
+#include "sim.h"
 
 /* Trova la migliore coppia cols,rows per N celle in un'area width x height */
 GridChoice grid_choose_aroundN(int N, int width, int height)

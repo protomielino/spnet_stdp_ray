@@ -4,8 +4,9 @@
 #include <stdint.h>
 
 #include "grid.h"
+#include "neuron_classification.h"
 
-#define VUBUF_LEN_MS 2000
+#define VUBUF_LEN_MS 1000
 
 typedef struct CellPos_s CellPos;
 
@@ -36,7 +37,7 @@ typedef struct
 
 
     /* per-neuron last spike time for STDP (ms), initialize to very negative */
-    int last_spike_time;
+    float last_spike_time;
     /* per-neuron v,u history buffer for selected trace (circular) */
     float v_hist[VUBUF_LEN_MS]; /* v_hist[idx] */
     float u_hist[VUBUF_LEN_MS]; /* u_hist[idx] */
@@ -65,6 +66,8 @@ typedef struct
 
     // For visualization: buffers storing instantaneous measure for each neuron
     float instant;
+
+    ClassResult class_result;
 } IzkNeuron;
 
 #endif /* NEURON_H_ */

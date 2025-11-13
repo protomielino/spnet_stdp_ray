@@ -5,9 +5,6 @@
 
 #include <raylib.h>
 
-// TEMPORANEO: da spostare in "sim" possibilmente.
-#define MAX_DELAY 20 /* ms */
-
 typedef struct
 {
     int numCols;

@@ -13,17 +13,19 @@
 #include "stb_ds.h"
 
 #include "math_utils.h"
+#include "sim.h"
 #include "grid.h"
 #include "palette.h"
 #include "neuron.h"
+#include "neuron_classification.h"
 
 ColourEntry *palette = NULL;
 
 /* Window */
-#define WIDTH 1200
-#define HEIGHT 700
+#define WIDTH 740
+#define HEIGHT 740
 
-#define DT 1         /* ms per sim step */
+#define DT 1.0         /* ms per sim step */
 
 /* Visualization layout */
 #define RASTER_H 350
@@ -53,8 +55,8 @@ typedef struct
 
 typedef struct
 {
-    int neuron;
-    int time_ms;
+    int   neuron;
+    float time_ms;
 } FiringTime;
 
 /* Globals */
@@ -75,7 +77,7 @@ static int vhist_idx = 0;
 static int uhist_idx = 0;
 
 /* Simulation time */
-static int t_ms = 0;
+static float t_ms = 0.0;
 
 /* Initialize delay buckets */
 static void init_delay_buckets()
@@ -347,7 +349,7 @@ static void init_network(Grid *grid)
 
     init_delay_buckets();
     firing_count = 0;
-    t_ms = 0;
+    t_ms = 0.0;
     vhist_idx = 0;
     grid->selected_cell = -1;
 
@@ -377,7 +379,7 @@ static void free_network(Grid *grid)
 }
 
 /* Add firing to circular buffer of pairs (time, neuron) */
-static void add_firing_record(int time_ms, int neuron)
+static void add_firing_record(float time_ms, int neuron)
 {
     if (firing_count >= firing_cap) {
         /* simple downsample: shift keep half */
@@ -395,20 +397,20 @@ static void add_firing_record(int time_ms, int neuron)
    When neuron 'post' spikes at time t_post, depress incoming excitatory synapses from pres that spiked recently.
    We'll implement updates at pre spike time on outgoing weights using last_spike_time[post].
 */
-static void apply_stdp_on_pre(int pre, int t_pre)
+static void apply_stdp_on_pre(int pre, float t_pre)
 {
     int K = arrlen(neurons[pre].outconn.targets); /* only excitatory neurons have CE */
     if (!neurons[pre].is_exc) /* only excitatory synapses are plastic */
         return;
     for (int i = 0; i < K; i++) {
         int post = neurons[pre].outconn.targets[i];
-        int t_post = neurons[post].last_spike_time;
+        float t_post = neurons[post].last_spike_time;
         if (t_post <= -100000)
             continue;
-        int dt = t_pre - t_post; /* positive if pre after post => depression */
+        float dt = t_pre - t_post; /* positive if pre after post => depression */
         if (dt > 0 && dt < 1000) {
             /* pre after post -> LTD (A_minus), dt positive */
-            float dw = -A_minus * expf(- (float)dt / TAU_MINUS);
+            float dw = -A_minus * expf(- dt / TAU_MINUS);
             neurons[pre].outconn.weights[i] += dw;
         } else {
             /* pre before post => potentiation handled when post spikes, to keep symmetry we handle both sides:
@@ -424,7 +426,7 @@ static void apply_stdp_on_pre(int pre, int t_pre)
    We don't store incoming lists for memory reasons, so iterate all excitatory neurons and check if they connect to 'post' - costly but acceptable for moderate CE/NE.
    Optimization: only check outgoing from excitatory population.
 */
-static void apply_stdp_on_post(Grid *grid, int post, int t_post)
+static void apply_stdp_on_post(Grid *grid, int post, float t_post)
 {
     /* For each excitatory neuron pre, check its outgoing connections for post */
     for (int pre = 0; pre < grid->numCells; pre++) {
@@ -433,10 +435,10 @@ static void apply_stdp_on_post(Grid *grid, int post, int t_post)
             for (int j = 0; j < K; j++) {
                 if (neurons[pre].outconn.targets[j] != post)
                     continue;
-                int t_pre = neurons[pre].last_spike_time;
+                float t_pre = neurons[pre].last_spike_time;
                 if (t_pre <= -100000)
                     continue;
-                int dt = t_post - t_pre; /* positive if post after pre => potentiation */
+                float dt = t_post - t_pre; /* positive if post after pre => potentiation */
                 if (dt > 0 && dt < 1000) {
                     float dw = A_plus * expf(- (float)dt / TAU_PLUS);
                     neurons[pre].outconn.weights[j] += dw;
@@ -490,9 +492,10 @@ static void sim_step(Grid *grid)
                 neurons[i].I += input_val * frandf();
     }
 
-    int num_sub_steps = 2;
+    int num_sub_steps = 4;
 
-#if 0
+#define INTEGRATOR_BIAS_CORRECTION 2
+#if (INTEGRATOR_BIAS_CORRECTION == 0)
     /* 3) Integrate neuron dynamics (Izhikevich) — versione naive (drifting bias) */
     for (int step = 0; step < num_sub_steps; ++step) {
         for (int i = 0; i < grid->numCells; i++) {
@@ -501,8 +504,7 @@ static void sim_step(Grid *grid)
             neurons[i].u += neurons[i].a * (neurons[i].b * neurons[i].v - neurons[i].u) * (DT / (float)num_sub_steps);
         }
     }
-#endif
-#if 0
+#elif (INTEGRATOR_BIAS_CORRECTION == 1)
     /* 3) Integrate: permuta deterministica dell'ordine */
     if (!order)
         arrsetlen(order, grid->numCells);
@@ -528,8 +530,7 @@ static void sim_step(Grid *grid)
             neurons[i].u += neurons[i].a * (neurons[i].b * neurons[i].v - neurons[i].u) * (DT / (float)num_sub_steps);
         }
     }
-#endif
-#if 1
+#elif (INTEGRATOR_BIAS_CORRECTION == 2)
     /* 3) Integrate neuron dynamics (Izhikevich) — versione buffer */
     if (!v_next) {
         arrsetlen(v_next, grid->numCells);
@@ -633,16 +634,32 @@ static int neuron_from_raster_click(Grid *grid, int click_x, int click_y, int rx
 bool graphics_raster = true;
 bool graphics_grid = false;
 
-/* Draw selected neuron v(t) trace */
+/* Draw selected neuron v/u(t) trace */
 static void draw_selected_trace(Grid *grid, int sx, int sy, int sw, int sh)
 {
     if (grid->selected_cell < 0) {
         DrawText(TextFormat("No neuron selected. Click %s to select.", (graphics_raster==true)?"raster":"grid"), sx+10, sy+10, 14, GRAY);
         return;
     }
-    char buf[128];
-    snprintf(buf, sizeof(buf), "Neuron %d  v,u(t) last %d ms", grid->selected_cell, VUBUF_LEN_MS);
-    DrawText(buf, sx+10, sy+10, 14, LIGHTGRAY);
+
+    char buf[1024];
+
+    snprintf(buf, sizeof(buf), "Neuron %d  v,u(t) last %d ms\n", grid->selected_cell, VUBUF_LEN_MS);
+    DrawText(buf, sx+10, sy+10, 10, LIGHTGRAY);
+    int buf_size_pix = MeasureText(buf, 10);
+    snprintf(buf, sizeof(buf), "Neuron params: a=%.4f b=%.4f c=%.2f d=%.2f\n",
+            neurons[grid->selected_cell].a,
+            neurons[grid->selected_cell].b,
+            neurons[grid->selected_cell].c,
+            neurons[grid->selected_cell].d);
+    DrawText(buf, sx+10, sy+20, 10, LIGHTGRAY);
+    buf_size_pix += MeasureText(buf, 10);
+//    memset(buf, 0, sizeof(buf));
+    snprintf(buf, sizeof(buf), "Type: %s\nScore: %.3f\nReason: %s\n",
+            neurons[grid->selected_cell].class_result.type,
+            neurons[grid->selected_cell].class_result.score,
+            neurons[grid->selected_cell].class_result.reason);
+    DrawText(buf, sx+10, sy+30, 10, LIGHTGRAY);
 
     /* draw outline */
     DrawRectangleLines(sx, sy, sw, sh, LIGHTGRAY);
@@ -661,8 +678,8 @@ static void draw_selected_trace(Grid *grid, int sx, int sy, int sw, int sh)
         vv = neurons[grid->selected_cell].v_hist[pos];
         uu = neurons[grid->selected_cell].u_hist[pos];
         /* map vv (-100..40) to y */
-        float vnorm = (vv + 100.0f) / 140.0f;
-        float unorm = (uu + 100.0f) / 140.0f;
+        float vnorm = (vv + 80.0f) / 120.0f;
+        float unorm = (uu + 20.0f) / 20.0f;
         vnorm = vnorm < 0 ? 0 : vnorm;
         vnorm = vnorm > 1 ? 1 : vnorm;
         unorm = unorm < 0 ? 0 : unorm;
@@ -769,7 +786,6 @@ void CustomLog(int msgType, const char *text, va_list args)
 #endif
 }
 
-
 int main(int argc, char **argv)
 {
     srand((unsigned)time(NULL));
@@ -818,16 +834,16 @@ int main(int argc, char **argv)
         int my = GetMouseY();
 
         if (IsKeyPressed(KEY_F1)) {
-            input_prob -= 0.01;
+            input_prob -= 0.001;
         }
         if (IsKeyPressed(KEY_F2)) {
-            input_prob += 0.01;
+            input_prob += 0.001;
         }
         if (IsKeyPressed(KEY_F3)) {
-            input_val -= 1.0;
+            input_val -= 0.1;
         }
         if (IsKeyPressed(KEY_F4)) {
-            input_val += 1.0;
+            input_val += 0.1;
         }
 
         /* input */
@@ -850,8 +866,12 @@ int main(int argc, char **argv)
             free_network(&grid);
             init_network(&grid);
         }
+        if (paused)
+            if (IsKeyPressed(KEY_RIGHT))
+                sim_step(&grid);
 
         if (IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
+            int nid = -1;
             if (graphics_raster) {
                 /* raster area coords */
                 int rx = grid.margin;
@@ -859,8 +879,7 @@ int main(int argc, char **argv)
                 int rw = WIDTH - 2*grid.margin;
                 int rh = RASTER_H;
 
-                int nid = neuron_from_raster_click(&grid, mx, my, rx, ry, rw, rh);
-                grid.selected_cell = (nid >= 0) ? nid : -1;
+                nid = neuron_from_raster_click(&grid, mx, my, rx, ry, rw, rh);
             }
             if (graphics_grid) {
                 /* grid area coords */
@@ -869,9 +888,20 @@ int main(int argc, char **argv)
                 int rw = grid.width;
                 int rh = grid.height;
 
-                int nid = cell_index_from_grid_click(&grid, mx, my, rx, ry, rw, rh);
-                grid.selected_cell = (nid >= 0) ? nid : -1;
+                nid = cell_index_from_grid_click(&grid, mx, my, rx, ry, rw, rh);
             }
+
+            grid.selected_cell = (nid >= 0) ? nid : -1;
+
+            float a = neurons[grid.selected_cell].a;
+            float b = neurons[grid.selected_cell].b;
+            float c = neurons[grid.selected_cell].c;
+            float d = neurons[grid.selected_cell].d;
+
+            ClassResult r = classify_neuron(a,b,c,d);
+            printf("Neuron params: a=%.4f b=%.4f c=%.2f d=%.2f\n", a,b,c,d);
+            printf("Type: %s\nScore: %.3f\nReason: %s\n", r.type, r.score, r.reason);
+            neurons[grid.selected_cell].class_result = r;
         }
 
         /* simulate */
@@ -986,15 +1016,15 @@ int main(int argc, char **argv)
                     int rw = WIDTH - 2*grid.margin;
                     int rh = RASTER_H;
                     DrawRectangleLines(rx-1, ry-1, rw+2, rh+2, LIGHTGRAY);
-                    DrawText("Raster (last 2000 ms)", rx+6, ry+6, 14, LIGHTGRAY);
+                    DrawText("Raster (last 1000 ms)", rx+6, ry+6, 14, LIGHTGRAY);
 
-                    /* draw spikes in last 2000 ms */
-                    int window_ms = 2000;
-                    int display_start = t_ms - window_ms;
+                    /* draw spikes in last 1000 ms */
+                    float window_ms = 1000.0;
+                    float display_start = t_ms - window_ms;
                     if (display_start < 0)
                         display_start = 0;
                     for (int i = 0; i < firing_count; i++) {
-                        int ft = firing_times[i].time_ms;   // firing time
+                        float ft = firing_times[i].time_ms;   // firing time
                         int nid = firing_times[i].neuron;   // neuron id
                         if (ft < display_start)
                             continue;
@@ -1070,7 +1100,7 @@ int main(int argc, char **argv)
                     DrawRectangleLines(px-1, py-1, pw+2, ph+2, LIGHTGRAY);
                     float mw = mean_exc_weight(&grid);
                     char info[256];
-                    snprintf(info, sizeof(info), "t=%d ms  mean_exc_weight=%.3f  steps/frame=%d  %s", t_ms, mw, steps_per_frame, paused ? "PAUSED" : "RUN");
+                    snprintf(info, sizeof(info), "mean_exc_weight=%.3f  steps/frame=%d  %s  ||  I=%.1f  I_prob=%.3f  ||  t=%.1f ms", mw, steps_per_frame, paused ? "PAUSED" : "RUN", input_val, input_prob, t_ms);
                     DrawText(info, px+6, py+6, 14, WHITE);
                     /* draw bar */
                     float barw = (mw / 10.0f) * (pw - 40);
@@ -1103,7 +1133,7 @@ int main(int argc, char **argv)
             int py = vy + vh + grid.margin;
             float mw = mean_exc_weight(&grid);
             char info[256];
-            snprintf(info, sizeof(info), "t=%d ms  mean_exc_weight=%.3f  steps/frame=%d  %s  ||  I=%.1f  I_prob=%.2f", t_ms, mw, steps_per_frame, paused ? "PAUSED" : "RUN", input_val, input_prob);
+            snprintf(info, sizeof(info), "mean_exc_weight=%.3f  steps/frame=%d  %s  ||  I=%.1f  I_prob=%.3f  ||  t=%.1f ms", mw, steps_per_frame, paused ? "PAUSED" : "RUN", input_val, input_prob, t_ms);
             DrawText(info, px+6, py+6, 14, WHITE);
 
             /* footer */
