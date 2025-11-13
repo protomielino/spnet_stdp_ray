@@ -879,29 +879,26 @@ int main(int argc, char **argv)
                 int rw = WIDTH - 2*grid.margin;
                 int rh = RASTER_H;
 
-                nid = neuron_from_raster_click(&grid, mx, my, rx, ry, rw, rh);
-            }
-            if (graphics_grid) {
+                grid.selected_cell = neuron_from_raster_click(&grid, mx, my, rx, ry, rw, rh);
+            } else if (graphics_grid) {
                 /* grid area coords */
                 int rx = grid.margin;
                 int ry = grid.margin;
                 int rw = grid.width;
                 int rh = grid.height;
 
-                nid = cell_index_from_grid_click(&grid, mx, my, rx, ry, rw, rh);
+                grid.selected_cell = cell_index_from_grid_click(&grid, mx, my, rx, ry, rw, rh);
             }
 
-            grid.selected_cell = (nid >= 0) ? nid : -1;
+            if (grid.selected_cell >= 0) {
+                float a = neurons[grid.selected_cell].a;
+                float b = neurons[grid.selected_cell].b;
+                float c = neurons[grid.selected_cell].c;
+                float d = neurons[grid.selected_cell].d;
 
-            float a = neurons[grid.selected_cell].a;
-            float b = neurons[grid.selected_cell].b;
-            float c = neurons[grid.selected_cell].c;
-            float d = neurons[grid.selected_cell].d;
-
-            ClassResult r = classify_neuron(a,b,c,d);
-            printf("Neuron params: a=%.4f b=%.4f c=%.2f d=%.2f\n", a,b,c,d);
-            printf("Type: %s\nScore: %.3f\nReason: %s\n", r.type, r.score, r.reason);
-            neurons[grid.selected_cell].class_result = r;
+                ClassResult r = classify_neuron(a,b,c,d);
+                neurons[grid.selected_cell].class_result = r;
+            }
         }
 
         /* simulate */
