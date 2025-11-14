@@ -48,28 +48,28 @@ static float sim_component(float x, float p, float scale_tol)
     return s;
 }
 
-static float score_against_entry(float a, float b, float c, float d, const ParsEntry *e)
+static float score_against_entry(IzkNeuron *neuron, const ParsEntry *e)
 {
     float tol_a = fmaxf(fabsf(e->a) * TOL_REL, 1e-4f);
     float tol_b = fmaxf(fabsf(e->b) * TOL_REL, 1e-4f);
-    float sa = sim_component(a, e->a, tol_a);
-    float sb = sim_component(b, e->b, tol_b);
-    float sc = sim_component(c, e->c, TOL_C);
-    float sd = sim_component(d, e->d, TOL_D);
+    float sa = sim_component(neuron->a, e->a, tol_a);
+    float sb = sim_component(neuron->b, e->b, tol_b);
+    float sc = sim_component(neuron->c, e->c, TOL_C);
+    float sd = sim_component(neuron->d, e->d, TOL_D);
     return W_A*sa + W_B*sb + W_C*sc + W_D*sd;
 }
 
 /* Helper: near-template check with absolute tolerances per field */
-static int near_template(float a, float b, float c, float d,
+static int near_template(IzkNeuron *neuron,
                          float ta, float tb, float tc, float td)
 {
-    if (fabsf(a - ta) > fmaxf(fabsf(ta)*TOL_REL, 0.01f))
+    if (fabsf(neuron->a - ta) > fmaxf(fabsf(ta)*TOL_REL, 0.01f))
         return 0;
-    if (fabsf(b - tb) > fmaxf(fabsf(tb)*TOL_REL, 0.01f))
+    if (fabsf(neuron->b - tb) > fmaxf(fabsf(tb)*TOL_REL, 0.01f))
         return 0;
-    if (fabsf(c - tc) > TOL_C)
+    if (fabsf(neuron->c - tc) > TOL_C)
         return 0;
-    if (fabsf(d - td) > TOL_D)
+    if (fabsf(neuron->d - td) > TOL_D)
         return 0;
     return 1;
 }
@@ -89,7 +89,7 @@ static float chirp_vs_burst_score(float c, float d)
     return score_ch - score_ib; /* >0 -> CH-like, <0 -> IB-like */
 }
 
-static void print_detailed_scores(float a, float b, float c, float d)
+static void print_detailed_scores(IzkNeuron *neuron, int best_idx)
 {
     printf("\nDetailed scores vs pars_table:\n");
     printf(" idx | name                            |   a_d  |   b_d  |   c_d  |   d_d  | score\n");
@@ -98,25 +98,24 @@ static void print_detailed_scores(float a, float b, float c, float d)
         const ParsEntry *e = &pars_table[i];
         float tol_a = fmaxf(fabsf(e->a) * TOL_REL, 1e-4f);
         float tol_b = fmaxf(fabsf(e->b) * TOL_REL, 1e-4f);
-        float da = fabsf(a - e->a) / (tol_a>0 ? tol_a : 1.0f);
-        float db = fabsf(b - e->b) / (tol_b>0 ? tol_b : 1.0f);
-        float dc = fabsf(c - e->c) / TOL_C;
-        float dd = fabsf(d - e->d) / TOL_D;
-        float s = score_against_entry(a,b,c,d,e);
-        printf("%4d | %-31s | %6.3f | %6.3f | %6.3f | %6.3f | %.3f\n",
+        float da = fabsf(neuron->a - e->a) / (tol_a>0 ? tol_a : 1.0f);
+        float db = fabsf(neuron->b - e->b) / (tol_b>0 ? tol_b : 1.0f);
+        float dc = fabsf(neuron->c - e->c) / TOL_C;
+        float dd = fabsf(neuron->d - e->d) / TOL_D;
+        float s = score_against_entry(neuron,e);
+        printf("%4d | %-31s | %6.3f | %6.3f | %6.3f | %6.3f | %.3f",
                i, e->name, da, db, dc, dd, s);
+        if (best_idx == i)
+            printf(" <<--best match--\n");
+        else
+            printf("\n");
     }
 }
 
 #define CLASSIFICATION_DEBUG
 
-ClassResult classify_neuron(float a, float b, float c, float d)
+ClassResult neuron_classify(IzkNeuron *neuron)
 {
-#ifdef CLASSIFICATION_DEBUG
-    /* debug: stampa dettagliata dei confronti */
-    print_detailed_scores(a,b,c,d);
-#endif
-
     ClassResult res;
     res.type[0] = '\0';
     res.score = 0.0f;
@@ -126,87 +125,92 @@ ClassResult classify_neuron(float a, float b, float c, float d)
     int best_idx = -1;
     float best_score = -1.0f;
     for (int i = 0; i < 20; ++i) {
-        float s = score_against_entry(a,b,c,d, &pars_table[i]);
-        if (s > best_score) { best_score = s; best_idx = i; }
+        float s = score_against_entry(neuron, &pars_table[i]);
+        if (s > best_score) {
+            best_score = s;
+            best_idx = i;
+        }
     }
 //    if (best_score >= SCORE_THRESHOLD && best_idx >= 0) {
 //        snprintf(res.type, sizeof(res.type), "%s", pars_table[best_idx].name);
 //        res.score = best_score;
 //        snprintf(res.reason, sizeof(res.reason), "Matched table row %d (score %.3f)", best_idx, best_score);
-//        return res;
+//        goto done;
 //    }
 
     /* 2) template espliciti coerenti con la tabella del paper */
-    if ( near_template(a,b,c,d, 0.02f, 0.25f, -65.0f, 2.0f) ) {
+    if ( near_template(neuron, 0.02f, 0.25f, -65.0f, 2.0f) ) {
         snprintf(res.type, sizeof(res.type), "LTS (Low-threshold spiking)");
         res.score = best_score;
         snprintf(res.reason, sizeof(res.reason), "Matches LTS template (0.02,0.25,-65,2)");
-        return res;
+        goto done;
     }
-    if ( near_template(a,b,c,d, 0.02f, 0.20f, -65.0f, 8.0f) ) {
+    if ( near_template(neuron, 0.02f, 0.20f, -65.0f, 8.0f) )
+    {
         snprintf(res.type, sizeof(res.type), "RS (Regular spiking)");
         res.score = best_score;
         snprintf(res.reason, sizeof(res.reason), "Matches RS template (0.02,0.2,-65,8)");
-        return res;
+        goto done;
     }
-    if ( near_template(a,b,c,d, 0.10f, 0.20f, -65.0f, 2.0f) ) {
+    if ( near_template(neuron, 0.10f, 0.20f, -65.0f, 2.0f) )
+    {
         snprintf(res.type, sizeof(res.type), "FS (Fast spiking)");
         res.score = best_score;
         snprintf(res.reason, sizeof(res.reason), "Matches FS template (0.1,0.2,-65,2)");
-        return res;
+        goto done;
     }
     /* disambiguazione CH vs IB per neuroni con a~0.02,b~0.2 */
-    if (fabsf(a - 0.02f) <= 0.01f && fabsf(b - 0.20f) <= 0.04f) {
-        float diff = chirp_vs_burst_score(c,d);
+    if (fabsf(neuron->a - 0.02f) <= 0.01f && fabsf(neuron->b - 0.20f) <= 0.04f) {
+        float diff = chirp_vs_burst_score(neuron->c, neuron->d);
         if (diff > 0.2f) {
             snprintf(res.type, sizeof(res.type), "CH (Chattering)");
             res.score = best_score;
             snprintf(res.reason, sizeof(res.reason), "a~0.02,b~0.2 and CH-like by c,d (score diff %.3f)", diff);
-            return res;
+            goto done;
         } else if (diff < -0.2f) {
             snprintf(res.type, sizeof(res.type), "IB (Intrinsic bursting / tonic bursting)");
             res.score = best_score;
             snprintf(res.reason, sizeof(res.reason), "a~0.02,b~0.2 and IB-like by c,d (score diff %.3f)", diff);
-            return res;
+            goto done;
         } else {
             /* borderline: return generic bursting with score */
             snprintf(res.type, sizeof(res.type), "Bursting (uncertain CH vs IB)");
             res.score = best_score;
             snprintf(res.reason, sizeof(res.reason), "a~0.02,b~0.2 but ambiguous CH/IB (diff %.3f)", diff);
-            return res;
+            goto done;
         }
     }
 
     /* 3) altre regole euristiche generali (fallback) */
-    if (a < 0.0f && b < 0.0f) {
+    if (neuron->a < 0.0f && neuron->b < 0.0f) {
         snprintf(res.type, sizeof(res.type), "Inhibition-induced (S/T)");
         res.score = best_score;
-        snprintf(res.reason, sizeof(res.reason), "a<0 (%.3f) and b<0 (%.3f)", a, b);
-        return res;
+        snprintf(res.reason, sizeof(res.reason), "a<0 (%.3f) and b<0 (%.3f)", neuron->a, neuron->b);
+        goto done;
     }
-    if (a >= 0.8f || b >= 1.0f) {
+    if (neuron->a >= 0.8f || neuron->b >= 1.0f) {
         snprintf(res.type, sizeof(res.type), "Bistable / DAP-like");
         res.score = best_score;
-        snprintf(res.reason, sizeof(res.reason), "large a(%.3f) or b(%.3f)", a, b);
-        return res;
+        snprintf(res.reason, sizeof(res.reason), "large a(%.3f) or b(%.3f)", neuron->a, neuron->b);
+        goto done;
     }
-    if (fabsf(a - 0.02f) <= 0.01f && fabsf(b - 0.2f) <= 0.05f) {
-        if (c >= -55.0f && d >= 10.0f) {
+    if (fabsf(neuron->a - 0.02f) <= 0.01f && fabsf(neuron->b - 0.2f) <= 0.05f) {
+        if (neuron->c >= -55.0f && neuron->d >= 10.0f) {
             snprintf(res.type, sizeof(res.type), "Bursting (CH/IB-like)");
             res.score = best_score;
-            snprintf(res.reason, sizeof(res.reason), "a~0.02,b~0.2 and c(%.1f)>=-55,d(%.1f)>=10", c, d);
-            return res;
+            snprintf(res.reason, sizeof(res.reason), "a~0.02,b~0.2 and c(%.1f)>=-55,d(%.1f)>=10", neuron->c, neuron->d);
+            goto done;
         }
         snprintf(res.type, sizeof(res.type), "RS (Regular Spiking)");
         res.score = best_score;
         snprintf(res.reason, sizeof(res.reason), "a~0.02,b~0.2 typical RS");
-        return res;
+        goto done;
     }
-    if (b >= 0.25f && a >= 0.05f) {
+    if (neuron->b >= 0.25f && neuron->a >= 0.05f) {
         snprintf(res.type, sizeof(res.type), "Fast-spiking / Class-2-like");
         res.score = best_score;
-        snprintf(res.reason, sizeof(res.reason), "b>=0.25 (%.3f) and a>=0.05 (%.3f)", b, a);
-        return res;
+        snprintf(res.reason, sizeof(res.reason), "b>=0.25 (%.3f) and a>=0.05 (%.3f)", neuron->b, neuron->a);
+        goto done;
     }
 
     /* fallback: nearest table row as hint */
@@ -219,5 +223,13 @@ ClassResult classify_neuron(float a, float b, float c, float d)
         res.score = best_score;
         snprintf(res.reason, sizeof(res.reason), "No match and no heuristic triggered");
     }
+
+done:
+
+#ifdef CLASSIFICATION_DEBUG
+    /* debug: stampa dettagliata dei confronti */
+    print_detailed_scores(neuron, best_idx);
+#endif
+
     return res;
 }

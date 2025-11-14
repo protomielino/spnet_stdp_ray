@@ -85,4 +85,6 @@ typedef struct
     ClassResult class_result;
 } IzkNeuron;
 
+ClassResult neuron_classify(IzkNeuron *neuron);
+
 #endif /* NEURON_H_ */

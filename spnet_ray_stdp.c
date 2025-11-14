@@ -886,12 +886,7 @@ int main(int argc, char **argv)
             }
 
             if (grid.selected_cell >= 0) {
-                float a = neurons[grid.selected_cell].a;
-                float b = neurons[grid.selected_cell].b;
-                float c = neurons[grid.selected_cell].c;
-                float d = neurons[grid.selected_cell].d;
-
-                ClassResult r = classify_neuron(a,b,c,d);
+                ClassResult r = neuron_classify(&neurons[grid.selected_cell]);
                 neurons[grid.selected_cell].class_result = r;
             }
         }
