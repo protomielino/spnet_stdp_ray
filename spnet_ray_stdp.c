@@ -22,7 +22,7 @@
 ColourEntry *palette = NULL;
 
 /* Window */
-#define WIDTH 740
+#define WIDTH 1360
 #define HEIGHT 740
 
 #define DT 1.0         /* ms per sim step */
@@ -465,8 +465,8 @@ static void schedule_spike_delivery(int pre, int conn_index)
     bucket_push(&delaybuckets[bucket_idx], post, w);
 }
 
-static float input_prob = 0.08f;    // default synaptic input noise probability
-static float input_val = 17.0f;     // default synaptic input current
+static float input_prob = 0.056f;   // default synaptic input noise probability
+static float input_val = 24.0f;     // default synaptic input current
 
 /* Simulation single step (1 ms) */
 static void sim_step(Grid *grid)
@@ -643,23 +643,20 @@ static void draw_selected_trace(Grid *grid, int sx, int sy, int sw, int sh)
     }
 
     char buf[1024];
-
-    snprintf(buf, sizeof(buf), "Neuron %d  v,u(t) last %d ms\n", grid->selected_cell, VUBUF_LEN_MS);
+    snprintf(buf, sizeof(buf),
+                "Neuron %d  v,u(t) last %d ms\n"
+                "Neuron params: a=%.4f b=%.4f c=%.2f d=%.2f\n"
+                "Type: %s  Score: %.3f\n"
+                "%s\n",
+                grid->selected_cell, VUBUF_LEN_MS,
+                neurons[grid->selected_cell].a,
+                neurons[grid->selected_cell].b,
+                neurons[grid->selected_cell].c,
+                neurons[grid->selected_cell].d,
+                neurons[grid->selected_cell].class_result.type,
+                neurons[grid->selected_cell].class_result.score,
+                neurons[grid->selected_cell].class_result.reason);
     DrawText(buf, sx+10, sy+10, 10, LIGHTGRAY);
-    int buf_size_pix = MeasureText(buf, 10);
-    snprintf(buf, sizeof(buf), "Neuron params: a=%.4f b=%.4f c=%.2f d=%.2f\n",
-            neurons[grid->selected_cell].a,
-            neurons[grid->selected_cell].b,
-            neurons[grid->selected_cell].c,
-            neurons[grid->selected_cell].d);
-    DrawText(buf, sx+10, sy+20, 10, LIGHTGRAY);
-    buf_size_pix += MeasureText(buf, 10);
-//    memset(buf, 0, sizeof(buf));
-    snprintf(buf, sizeof(buf), "Type: %s\nScore: %.3f\nReason: %s\n",
-            neurons[grid->selected_cell].class_result.type,
-            neurons[grid->selected_cell].class_result.score,
-            neurons[grid->selected_cell].class_result.reason);
-    DrawText(buf, sx+10, sy+30, 10, LIGHTGRAY);
 
     /* draw outline */
     DrawRectangleLines(sx, sy, sw, sh, LIGHTGRAY);
@@ -871,7 +868,6 @@ int main(int argc, char **argv)
                 sim_step(&grid);
 
         if (IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
-            int nid = -1;
             if (graphics_raster) {
                 /* raster area coords */
                 int rx = grid.margin;
@@ -1013,6 +1009,11 @@ int main(int argc, char **argv)
                     int rw = WIDTH - 2*grid.margin;
                     int rh = RASTER_H;
                     DrawRectangleLines(rx-1, ry-1, rw+2, rh+2, LIGHTGRAY);
+#if 0
+                    for (float cl = 0; cl < grid.width; cl += grid.cellWidth) { 
+                        DrawLine(cl+grid.margin, grid.margin, cl+grid.margin, rh+grid.margin, (Color){255,255,255,64});
+                    }
+#endif
                     DrawText("Raster (last 1000 ms)", rx+6, ry+6, 14, LIGHTGRAY);
 
                     /* draw spikes in last 1000 ms */
