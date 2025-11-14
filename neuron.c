@@ -74,6 +74,20 @@ static int near_template(float a, float b, float c, float d,
     return 1;
 }
 
+/* differenzia CH (chattering) da IB (tonic bursting)
+   CH: tende ad avere c più alto (es. -50) e d piccolo; IB: c ~ -55, d più grande.
+   Questa funzione restituisce >0.5 se probabilmente CH, <-0.5 se IB, altrimenti 0.*/
+static float chirp_vs_burst_score(float c, float d) {
+    /* distanza normalizzata a circa intervalli tipici */
+    float sc_ch = 1.0f - fminf(fabsf(c + 50.0f) / 5.0f, 1.0f); /* preferisce c ~ -50 */
+    float sd_ch = 1.0f - fminf(fabsf(d - 2.0f) / 3.0f, 1.0f);  /* preferisce d ~ 2 */
+    float sc_ib = 1.0f - fminf(fabsf(c + 55.0f) / 5.0f, 1.0f); /* preferisce c ~ -55 */
+    float sd_ib = 1.0f - fminf(fabsf(d - 4.0f) / 4.0f, 1.0f);  /* preferisce d ~ 4 */
+    float score_ch = 0.6f * sc_ch + 0.4f * sd_ch;
+    float score_ib = 0.6f * sc_ib + 0.4f * sd_ib;
+    return score_ch - score_ib; /* >0 -> CH-like, <0 -> IB-like */
+}
+
 ClassResult classify_neuron(float a, float b, float c, float d)
 {
     ClassResult res;
@@ -108,23 +122,32 @@ ClassResult classify_neuron(float a, float b, float c, float d)
         snprintf(res.reason, sizeof(res.reason), "Matches RS template (0.02,0.2,-65,8)");
         return res;
     }
-    if ( near_template(a,b,c,d, 0.02f, 0.20f, -55.0f, 4.0f) ) {
-        snprintf(res.type, sizeof(res.type), "IB (Intrinsic bursting)");
-        res.score = best_score;
-        snprintf(res.reason, sizeof(res.reason), "Matches IB template (0.02,0.2,-55,4)");
-        return res;
-    }
-    if ( near_template(a,b,c,d, 0.02f, 0.20f, -50.0f, 2.0f) ) {
-        snprintf(res.type, sizeof(res.type), "CH (Chattering)");
-        res.score = best_score;
-        snprintf(res.reason, sizeof(res.reason), "Matches CH template (0.02,0.2,-50,2)");
-        return res;
-    }
     if ( near_template(a,b,c,d, 0.10f, 0.20f, -65.0f, 2.0f) ) {
         snprintf(res.type, sizeof(res.type), "FS (Fast spiking)");
         res.score = best_score;
         snprintf(res.reason, sizeof(res.reason), "Matches FS template (0.1,0.2,-65,2)");
         return res;
+    }
+    /* disambiguazione CH vs IB per neuroni con a~0.02,b~0.2 */
+    if (fabsf(a - 0.02f) <= 0.01f && fabsf(b - 0.20f) <= 0.04f) {
+        float diff = chirp_vs_burst_score(c,d);
+        if (diff > 0.2f) {
+            snprintf(res.type, sizeof(res.type), "CH (Chattering)");
+            res.score = best_score;
+            snprintf(res.reason, sizeof(res.reason), "a~0.02,b~0.2 and CH-like by c,d (score diff %.3f)", diff);
+            return res;
+        } else if (diff < -0.2f) {
+            snprintf(res.type, sizeof(res.type), "IB (Intrinsic bursting / tonic bursting)");
+            res.score = best_score;
+            snprintf(res.reason, sizeof(res.reason), "a~0.02,b~0.2 and IB-like by c,d (score diff %.3f)", diff);
+            return res;
+        } else {
+            /* borderline: return generic bursting with score */
+            snprintf(res.type, sizeof(res.type), "Bursting (uncertain CH vs IB)");
+            res.score = best_score;
+            snprintf(res.reason, sizeof(res.reason), "a~0.02,b~0.2 but ambiguous CH/IB (diff %.3f)", diff);
+            return res;
+        }
     }
 
     /* 3) altre regole euristiche generali (fallback) */
