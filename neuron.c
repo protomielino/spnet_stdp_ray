@@ -28,10 +28,10 @@ static const ParsEntry pars_table[20] = {
 };
 
 /* Configurabili */
-const float TOL_REL = 0.15f;    /* tolleranza relativa per a,b */
-const float TOL_C = 5.0f;       /* tolleranza assoluta per c (mV) */
-const float TOL_D = 3.0f;       /* tolleranza assoluta per d */
-const float SCORE_THRESHOLD = 0.8f;
+const float TOL_REL = 0.10f;    /* tolleranza relativa per a,b */
+const float TOL_C = 3.0f;       /* tolleranza assoluta per c (mV) */
+const float TOL_D = 1.5f;       /* tolleranza assoluta per d */
+const float SCORE_THRESHOLD = 0.85f;
 
 /* Pesi per a,b,c,d nel calcolo dello score (sommano a 1) */
 const float W_A = 0.25f;
