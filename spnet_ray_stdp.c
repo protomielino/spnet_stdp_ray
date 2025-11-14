@@ -17,7 +17,6 @@
 #include "grid.h"
 #include "palette.h"
 #include "neuron.h"
-#include "neuron_classification.h"
 
 ColourEntry *palette = NULL;
 

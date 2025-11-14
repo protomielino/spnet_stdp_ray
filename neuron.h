@@ -4,11 +4,24 @@
 #include <stdint.h>
 
 #include "grid.h"
-#include "neuron_classification.h"
+#include "neuron.h"
 
 #define VUBUF_LEN_MS 1000
 
+typedef struct
+{
+    float a,b,c,d;
+    const char *name;
+} ParsEntry;
 
+typedef struct
+{
+    char type[128];
+    float score;
+    char reason[256];
+} ClassResult;
+
+ClassResult classify_neuron(float a, float b, float c, float d);
 
 typedef struct CellPos_s CellPos;
 
