@@ -77,7 +77,8 @@ static int near_template(float a, float b, float c, float d,
 /* differenzia CH (chattering) da IB (tonic bursting)
    CH: tende ad avere c più alto (es. -50) e d piccolo; IB: c ~ -55, d più grande.
    Questa funzione restituisce >0.5 se probabilmente CH, <-0.5 se IB, altrimenti 0.*/
-static float chirp_vs_burst_score(float c, float d) {
+static float chirp_vs_burst_score(float c, float d)
+{
     /* distanza normalizzata a circa intervalli tipici */
     float sc_ch = 1.0f - fminf(fabsf(c + 50.0f) / 5.0f, 1.0f); /* preferisce c ~ -50 */
     float sd_ch = 1.0f - fminf(fabsf(d - 2.0f) / 3.0f, 1.0f);  /* preferisce d ~ 2 */
@@ -88,8 +89,34 @@ static float chirp_vs_burst_score(float c, float d) {
     return score_ch - score_ib; /* >0 -> CH-like, <0 -> IB-like */
 }
 
+static void print_detailed_scores(float a, float b, float c, float d)
+{
+    printf("\nDetailed scores vs pars_table:\n");
+    printf(" idx | name                            |   a_d  |   b_d  |   c_d  |   d_d  | score\n");
+    printf("-----+---------------------------------+--------+--------+--------+--------+-------\n");
+    for (int i = 0; i < 20; ++i) {
+        const ParsEntry *e = &pars_table[i];
+        float tol_a = fmaxf(fabsf(e->a) * TOL_REL, 1e-4f);
+        float tol_b = fmaxf(fabsf(e->b) * TOL_REL, 1e-4f);
+        float da = fabsf(a - e->a) / (tol_a>0 ? tol_a : 1.0f);
+        float db = fabsf(b - e->b) / (tol_b>0 ? tol_b : 1.0f);
+        float dc = fabsf(c - e->c) / TOL_C;
+        float dd = fabsf(d - e->d) / TOL_D;
+        float s = score_against_entry(a,b,c,d,e);
+        printf("%4d | %-31s | %6.3f | %6.3f | %6.3f | %6.3f | %.3f\n",
+               i, e->name, da, db, dc, dd, s);
+    }
+}
+
+#define CLASSIFICATION_DEBUG
+
 ClassResult classify_neuron(float a, float b, float c, float d)
 {
+#ifdef CLASSIFICATION_DEBUG
+    /* debug: stampa dettagliata dei confronti */
+    print_detailed_scores(a,b,c,d);
+#endif
+
     ClassResult res;
     res.type[0] = '\0';
     res.score = 0.0f;
