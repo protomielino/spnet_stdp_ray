@@ -15,13 +15,16 @@
 #define W_MIN 0.0f
 #define W_MAX 10.0f
 
+/* Raster storage */
+#define FIRING_BUF 2000000 /* pair (time, neuron) capacity */
+
 /* Delay queues: for each delay (1..MAX_DELAY) maintain list of targets arriving after that many ms */
 typedef struct
 {
-    int *neuron;   /* target neuron ids */
+    int   *neuron; /* target neuron ids */
     float *weight; /* corresponding weights */
-    int count;
-    int cap;
+    int    count;
+    int    cap;
 } DelayBucket;
 
 typedef struct
@@ -32,7 +35,40 @@ typedef struct
 
 typedef struct
 {
-    int foo;
+    int num_exc; // number of exc neurons
+    int num_inh; // number of inh neurons
+    float exc_to_inh_ratio;
+    IzkNeuron *neurons;
+    DelayBucket *delaybuckets;    /* index 1..MAX_DELAY used; 0 unused */
+    int current_delay_index;         /* rotates every ms */
+    FiringTime *firing_times;            /* circular buffer of pairs (time, neuron) */
+    int firing_count;
+    int firing_cap;
+    float *v_next;
+    float *u_next;
+    int *order;
+
+    /* per-neuron v/u history index for selected trace (circular) */
+    int vhist_idx;
+    int uhist_idx;
+
+    float input_prob;   // default synaptic input noise probability
+    float input_val;     // default synaptic input current
+
+    /* Simulation time */
+    float t_ms;
 } sim;
+
+//static void init_delay_buckets(sim *s);
+//static void ensure_bucket_cap(sim *s, DelayBucket *db, int need);
+//static void bucket_push(sim *s, DelayBucket *db, int neuron, float weight);
+//static void bucket_clear(sim *s, DelayBucket *db);
+void init_network(sim *s, Grid *grid);
+void free_network(sim *s, Grid *grid);
+//static void add_firing_record(sim *s, float time_ms, int neuron);
+//static void apply_stdp_on_pre(sim *s, int pre, float t_pre);
+//static void apply_stdp_on_post(sim *s, Grid *grid, int post, float t_post);
+//static void schedule_spike_delivery(sim *s, int pre, int conn_index);
+void sim_step(sim *s, Grid *grid);
 
 #endif /* SIM_H_ */
