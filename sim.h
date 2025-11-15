@@ -63,12 +63,12 @@ typedef struct
 //static void ensure_bucket_cap(sim *s, DelayBucket *db, int need);
 //static void bucket_push(sim *s, DelayBucket *db, int neuron, float weight);
 //static void bucket_clear(sim *s, DelayBucket *db);
-void init_network(sim *s, Grid *grid);
-void free_network(sim *s, Grid *grid);
 //static void add_firing_record(sim *s, float time_ms, int neuron);
 //static void apply_stdp_on_pre(sim *s, int pre, float t_pre);
 //static void apply_stdp_on_post(sim *s, Grid *grid, int post, float t_post);
 //static void schedule_spike_delivery(sim *s, int pre, int conn_index);
+void sim_init_network(sim *s, Grid *grid);
+void sim_free_network(sim *s, Grid *grid);
 void sim_step(sim *s, Grid *grid);
 
 #endif /* SIM_H_ */

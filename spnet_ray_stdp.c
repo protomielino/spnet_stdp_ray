@@ -13,10 +13,10 @@
 #include "stb_ds.h"
 
 #include "math_utils.h"
+#include "neuron.h"
 #include "sim.h"
 #include "grid.h"
 #include "palette.h"
-#include "neuron.h"
 
 ColourEntry *palette = NULL;
 
@@ -251,7 +251,7 @@ int main(int argc, char **argv)
     SetTargetFPS(30);
 
     sim s = {0};
-    init_network(&s, &grid);
+    sim_init_network(&s, &grid);
 
     int paused = 0;
     int show_graphics = 1;
@@ -296,8 +296,8 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_DOWN))
             steps_per_frame = Clamp(steps_per_frame-1, 1, 5000);
         if (IsKeyPressed(KEY_R)) {
-            free_network(&s, &grid);
-            init_network(&s, &grid);
+            sim_free_network(&s, &grid);
+            sim_init_network(&s, &grid);
         }
         if (paused)
             if (IsKeyPressed(KEY_RIGHT))
@@ -311,7 +311,8 @@ int main(int argc, char **argv)
                 int rw = WIDTH - 2*grid.margin;
                 int rh = RASTER_H;
 
-                grid.selected_cell = neuron_from_raster_click(&grid, mx, my, rx, ry, rw, rh);
+                grid.selected_cell =
+                        neuron_from_raster_click(&grid, mx, my, rx, ry, rw, rh);
             } else if (graphics_grid) {
                 /* grid area coords */
                 int rx = grid.margin;
@@ -319,7 +320,8 @@ int main(int argc, char **argv)
                 int rw = grid.width;
                 int rh = grid.height;
 
-                grid.selected_cell = cell_index_from_grid_click(&grid, mx, my, rx, ry, rw, rh);
+                grid.selected_cell =
+                        cell_index_from_grid_click(&grid, mx, my, rx, ry, rw, rh);
             }
 
             if (grid.selected_cell >= 0) {
@@ -342,25 +344,6 @@ int main(int argc, char **argv)
                     compute_cell_activity(&grid, &s);
 
                     grid_show(&grid, &s);
-
-//                    // evidenzia celle disponibili nell'anello (trasparente)
-//                    for (int ni = 0; ni < grid.numCells; ++ni) {
-//                        CellPos cell_rc = {0};
-//                        cell_rc = index_to_cellpos(ni, &cell_rc.r, &cell_rc.c);
-//                        if (in_annulus(cell_rc.r, cell_rc.c, center, rmin, rmax)) {
-//                            Vector2 cell_xy = cellpos_to_vec2(cell_rc);
-//                            DrawRectangleLines(cell_xy.x+1, cell_xy.y+1, grid.cellWidth - 2, grid.cellHeight - 2, (Color){200, 230, 255, 255});
-//                        }
-//                    }
-//
-//                    for (int i = 0; i < selected_count; i++) {
-//                        // selected cell
-//                        CellPos cp = {0};
-//                        cp.r = selected[i].r;
-//                        cp.c = selected[i].c;
-//                        Vector2 xy = cellpos_to_vec2(cp);
-//                        DrawRectangleLines(xy.x+2, xy.y+2, grid.cellWidth-4, grid.cellHeight-4, (Color){ 253, 249, 0, 255 });
-//                    }
 
                     if (grid.selected_cell >= 0) {
                         /* selected neuron trace */
@@ -418,19 +401,6 @@ int main(int argc, char **argv)
                             post_pos_xy = Vector2Add(post_pos_xy, (Vector2){ grid.cellWidth/2, grid.cellHeight/2 });
                             DrawLineV(target_pos_xy, post_pos_xy, (Color){255, 255, 255, 128});
                         }
-
-//                        for (int i = 0; i < K; ++i) {
-//                            int post = neurons[grid.selected_cell].outconn.targets[i];
-//                            CellPos target_pos = {0};
-//                            CellPos post_pos = {0};
-//                            target_pos = grid_index_to_cellpos(&grid, grid.selected_cell, &target_pos);
-//                            post_pos = grid_index_to_cellpos(&grid, post, &post_pos);
-//                            Vector2 this_cell_pos_xy = grid_cellpos_to_vec2(&grid, target_pos);
-//                            Vector2 post_cell_pos_xy = grid_cellpos_to_vec2(&grid, post_pos);
-//                            this_cell_pos_xy = Vector2Add(this_cell_pos_xy, (Vector2){ grid.cellWidth/2, grid.cellHeight/2 });
-//                            post_cell_pos_xy = Vector2Add(post_cell_pos_xy, (Vector2){ grid.cellWidth/2, grid.cellHeight/2 });
-//                            DrawLineV(this_cell_pos_xy, post_cell_pos_xy, (Color){255, 255, 255, 32});
-//                        }
                     }
                 }
                 if (graphics_raster) {
@@ -442,7 +412,7 @@ int main(int argc, char **argv)
                     DrawRectangleLines(rx-1, ry-1, rw+2, rh+2, LIGHTGRAY);
 #if 0
                     for (float cl = 0; cl < grid.width; cl += grid.cellWidth) { 
-                        DrawLine(cl+grid.margin, grid.margin, cl+grid.margin, rh+grid.margin, (Color){255,255,255,64});
+                        DrawLine(cl+grid.margin, grid.margin, cl+grid.margin, rh+grid.margin, (Color){255,255,255,32});
                     }
 #endif
                     DrawText("Raster (last 1000 ms)", rx+6, ry+6, 14, LIGHTGRAY);
@@ -471,9 +441,8 @@ int main(int argc, char **argv)
                             dot_radius = 3.0;
                         }
 
-
                         if (nid == grid.selected_cell)
-                            DrawCircle(x, y, 3, YELLOW);
+                            DrawCircle(x, y, dot_radius, YELLOW);
                         if ((ft < s.t_ms) && (ft > s.t_ms - 10)) {
                             if (s.neurons[nid].is_exc ) {
                                 DrawCircle(x, y, dot_radius, WHITE);
@@ -573,7 +542,7 @@ int main(int argc, char **argv)
         } EndDrawing();
     }
 
-    free_network(&s, &grid);
+    sim_free_network(&s, &grid);
     arrfree(palette);
 
     CloseWindow();

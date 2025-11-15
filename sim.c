@@ -51,9 +51,98 @@ static void bucket_clear(sim *s, DelayBucket *db)
     db->count = 0;
 }
 
-/* Initialize network (connections, weights, delays, v/u, buffers) */
-void init_network(sim *s, Grid *grid)
+/* Add firing to circular buffer of pairs (time, neuron) */
+static void add_firing_record(sim *s, float time_ms, int neuron)
 {
+    if (s->firing_count >= s->firing_cap) {
+        /* simple downsample: shift keep half */
+        int keep = s->firing_cap / 2;
+        int start = (s->firing_count - keep);
+        memmove(s->firing_times, s->firing_times + start, keep * sizeof(int));
+        s->firing_count = keep;
+    }
+    s->firing_times[s->firing_count] = (FiringTime){ neuron, time_ms };
+    s->firing_count++;
+}
+
+/* STDP weight update on spike: apply pair-based approximation
+   When neuron 'pre' spikes at time t_pre, potentiate outgoing synapses to posts that spiked recently.
+   When neuron 'post' spikes at time t_post, depress incoming excitatory synapses from pres that spiked recently.
+   We'll implement updates at pre spike time on outgoing weights using last_spike_time[post].
+*/
+static void apply_stdp_on_pre(sim *s, int pre, float t_pre)
+{
+    int K = arrlen(s->neurons[pre].outconn.targets); /* only excitatory neurons have CE */
+    if (!s->neurons[pre].is_exc) /* only excitatory synapses are plastic */
+        return;
+    for (int i = 0; i < K; i++) {
+        int post = s->neurons[pre].outconn.targets[i];
+        float t_post = s->neurons[post].last_spike_time;
+        if (t_post <= -100000)
+            continue;
+        float dt = t_pre - t_post; /* positive if pre after post => depression */
+        if (dt > 0 && dt < 1000) {
+            /* pre after post -> LTD (A_minus), dt positive */
+            float dw = -A_minus * expf(- dt / TAU_MINUS);
+            s->neurons[pre].outconn.weights[i] += dw;
+        } else {
+            /* pre before post => potentiation handled when post spikes, to keep symmetry we handle both sides:
+               We'll also handle LTP when pre precedes post by applying when post spikes (below). */
+        }
+        /* clamp */
+        s->neurons[pre].outconn.weights[i] =
+                clampf(s->neurons[pre].outconn.weights[i], W_MIN, W_MAX);
+    }
+}
+
+/* Called when a neuron spikes (post), apply LTP for incoming excitatory synapses.
+   We don't store incoming lists for memory reasons, so iterate all excitatory neurons and check if they connect to 'post' - costly but acceptable for moderate CE/NE.
+   Optimization: only check outgoing from excitatory population.
+*/
+static void apply_stdp_on_post(sim *s, Grid *grid, int post, float t_post)
+{
+    /* For each excitatory neuron pre, check its outgoing connections for post */
+    for (int pre = 0; pre < grid->numCells; pre++) {
+        if (s->neurons[pre].is_exc) {
+            int K = arrlen(s->neurons[pre].outconn.targets);
+            for (int j = 0; j < K; j++) {
+                if (s->neurons[pre].outconn.targets[j] != post)
+                    continue;
+                float t_pre = s->neurons[pre].last_spike_time;
+                if (t_pre <= -100000)
+                    continue;
+                float dt = t_post - t_pre; /* positive if post after pre => potentiation */
+                if (dt > 0 && dt < 1000) {
+                    float dw = A_plus * expf(- (float)dt / TAU_PLUS);
+                    s->neurons[pre].outconn.weights[j] += dw;
+                    /* clamp */
+                    s->neurons[pre].outconn.weights[j] = clampf(s->neurons[pre].outconn.weights[j], W_MIN, W_MAX);
+                }
+            }
+        }
+    }
+}
+
+/* Schedule a delivered event: place target in delay bucket for appropriate arrival time */
+static void schedule_spike_delivery(sim *s, int pre, int conn_index)
+{
+    int post = s->neurons[pre].outconn.targets[conn_index];
+    float w = s->neurons[pre].outconn.weights[conn_index];
+    int delay = s->neurons[pre].outconn.delay[conn_index];
+    if (delay < 1)
+        delay = 1;
+    if (delay > MAX_DELAY)
+        delay = MAX_DELAY;
+    int bucket_idx = (s->current_delay_index + delay) % (MAX_DELAY+1);
+    /* note: using 0..MAX_DELAY buckets, but we never place into index 0 unless delay==0; safe since bucket array sized */
+    bucket_push(s, &s->delaybuckets[bucket_idx], post, w);
+}
+
+/* Initialize network (connections, weights, delays, v/u, buffers) */
+void sim_init_network(sim *s, Grid *grid)
+{
+    *s = (sim){0};
+
     /* per-neuron v,u history index for selected trace (circular) */
     s->firing_cap = FIRING_BUF;
 
@@ -209,55 +298,6 @@ void init_network(sim *s, Grid *grid)
             }
             arrfree(distant_targets); distant_targets = NULL;
         }
-
-//        /* 3) riempi con bersagli casuali se necessario */
-//        while (filled < K) {
-//            int targ = rand() % N;
-//            neurons[i].outconn.targets[filled] = targ;
-//            if (is_exc) {
-//                neurons[i].outconn.weights[filled] = 6.0f * frandf();
-//                int tr, tc;
-//                index_to_cellpos(targ, &tr, &tc);
-//                int dsq = toroidal_dist_sq(cr, cc, tr, tc);
-//                int cell_dist = (int)floorf(sqrtf((float)dsq) + 0.5f);
-//                neurons[i].outconn.delay[filled] = compute_delay_from_cells(cell_dist, vel_unmyelinated);
-//            } else {
-//                neurons[i].outconn.weights[filled] = -5.0f * frandf();
-//                neurons[i].outconn.delay[filled] = 1;
-//            }
-//            filled++;
-//        }
-//    }
-//    /* init connections usando neurons[i].is_exc */
-//    for (int i = 0; i < grid->numCells; i++) {
-//        int K = neurons[i].is_exc ? CE : CI;
-//        CellPos *selected = NULL;
-//        arrsetlen(selected, K);
-//
-//        int rmax = neurons[i].is_exc ? 6 : 3;
-//        CellPos this_cell = grid_index_to_cellpos(grid, i, &this_cell);
-//        // primo picking iniziale
-//        grid_pick_random_cells_in_annulus(grid, this_cell, 0, rmax, K, selected);
-//
-//        neurons[i].outconn.targets = NULL;
-//        neurons[i].outconn.weights = NULL;
-//        neurons[i].outconn.delay = NULL;
-//        for (int j = 0; j < K; j++) {
-//            CellPos c = {selected[j].r, selected[j].c};
-//            arrput(neurons[i].outconn.targets, grid_cellpos_to_index(grid, c));
-//            if (neurons[i].is_exc) {
-//                /* excitatory initial weight random around 6.0 +- */
-//                arrput(neurons[i].outconn.weights, 6.0f * frandf());
-//                /* excitatory delay 1..MAX_DELAY */
-//                arrput(neurons[i].outconn.delay, (unsigned char)(1 + (rand() % MAX_DELAY)));
-//            } else {
-//                /* inhibitory negative weight */
-//                arrput(neurons[i].outconn.weights, -5.0f * frandf());
-//                arrput(neurons[i].outconn.delay, 1); /* inhibitory delay 1 ms */
-//            }
-//        }
-//
-//        arrfree(selected);
     }
 
     init_delay_buckets(s);
@@ -267,7 +307,7 @@ void init_network(sim *s, Grid *grid)
 }
 
 /* Free network memory */
-void free_network(sim *s, Grid *grid)
+void sim_free_network(sim *s, Grid *grid)
 {
     if (!s->neurons)
         return;
@@ -286,93 +326,6 @@ void free_network(sim *s, Grid *grid)
     arrfree(s->order);
     arrfree(s->v_next);
     arrfree(s->u_next);
-}
-
-/* Add firing to circular buffer of pairs (time, neuron) */
-static void add_firing_record(sim *s, float time_ms, int neuron)
-{
-    if (s->firing_count >= s->firing_cap) {
-        /* simple downsample: shift keep half */
-        int keep = s->firing_cap / 2;
-        int start = (s->firing_count - keep);
-        memmove(s->firing_times, s->firing_times + start, keep * sizeof(int));
-        s->firing_count = keep;
-    }
-    s->firing_times[s->firing_count] = (FiringTime){ neuron, time_ms };
-    s->firing_count++;
-}
-
-/* STDP weight update on spike: apply pair-based approximation
-   When neuron 'pre' spikes at time t_pre, potentiate outgoing synapses to posts that spiked recently.
-   When neuron 'post' spikes at time t_post, depress incoming excitatory synapses from pres that spiked recently.
-   We'll implement updates at pre spike time on outgoing weights using last_spike_time[post].
-*/
-static void apply_stdp_on_pre(sim *s, int pre, float t_pre)
-{
-    int K = arrlen(s->neurons[pre].outconn.targets); /* only excitatory neurons have CE */
-    if (!s->neurons[pre].is_exc) /* only excitatory synapses are plastic */
-        return;
-    for (int i = 0; i < K; i++) {
-        int post = s->neurons[pre].outconn.targets[i];
-        float t_post = s->neurons[post].last_spike_time;
-        if (t_post <= -100000)
-            continue;
-        float dt = t_pre - t_post; /* positive if pre after post => depression */
-        if (dt > 0 && dt < 1000) {
-            /* pre after post -> LTD (A_minus), dt positive */
-            float dw = -A_minus * expf(- dt / TAU_MINUS);
-            s->neurons[pre].outconn.weights[i] += dw;
-        } else {
-            /* pre before post => potentiation handled when post spikes, to keep symmetry we handle both sides:
-               We'll also handle LTP when pre precedes post by applying when post spikes (below). */
-        }
-        /* clamp */
-        s->neurons[pre].outconn.weights[i] =
-                clampf(s->neurons[pre].outconn.weights[i], W_MIN, W_MAX);
-    }
-}
-
-/* Called when a neuron spikes (post), apply LTP for incoming excitatory synapses.
-   We don't store incoming lists for memory reasons, so iterate all excitatory neurons and check if they connect to 'post' - costly but acceptable for moderate CE/NE.
-   Optimization: only check outgoing from excitatory population.
-*/
-static void apply_stdp_on_post(sim *s, Grid *grid, int post, float t_post)
-{
-    /* For each excitatory neuron pre, check its outgoing connections for post */
-    for (int pre = 0; pre < grid->numCells; pre++) {
-        if (s->neurons[pre].is_exc) {
-            int K = arrlen(s->neurons[pre].outconn.targets);
-            for (int j = 0; j < K; j++) {
-                if (s->neurons[pre].outconn.targets[j] != post)
-                    continue;
-                float t_pre = s->neurons[pre].last_spike_time;
-                if (t_pre <= -100000)
-                    continue;
-                float dt = t_post - t_pre; /* positive if post after pre => potentiation */
-                if (dt > 0 && dt < 1000) {
-                    float dw = A_plus * expf(- (float)dt / TAU_PLUS);
-                    s->neurons[pre].outconn.weights[j] += dw;
-                    /* clamp */
-                    s->neurons[pre].outconn.weights[j] = clampf(s->neurons[pre].outconn.weights[j], W_MIN, W_MAX);
-                }
-            }
-        }
-    }
-}
-
-/* Schedule a delivered event: place target in delay bucket for appropriate arrival time */
-static void schedule_spike_delivery(sim *s, int pre, int conn_index)
-{
-    int post = s->neurons[pre].outconn.targets[conn_index];
-    float w = s->neurons[pre].outconn.weights[conn_index];
-    int delay = s->neurons[pre].outconn.delay[conn_index];
-    if (delay < 1)
-        delay = 1;
-    if (delay > MAX_DELAY)
-        delay = MAX_DELAY;
-    int bucket_idx = (s->current_delay_index + delay) % (MAX_DELAY+1);
-    /* note: using 0..MAX_DELAY buckets, but we never place into index 0 unless delay==0; safe since bucket array sized */
-    bucket_push(s, &s->delaybuckets[bucket_idx], post, w);
 }
 
 /* Simulation single step (1 ms) */
