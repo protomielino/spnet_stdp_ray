@@ -142,7 +142,7 @@ void Palette_SetColour(ColourEntry **palette, double d, Color col, double spread
 
     /* Se esiste entry esatta alla stessa posizione, sovrascrivi */
     for (size_t i = 0; i < arrlen(*palette); i++) {
-        if ((*palette)[i].first == d) {
+        if ((*palette)[i].first == d) { // TODO: sistema questa boiata
             (*palette)[i].second = col;
             (*palette)[i].spread = spread;
             return;

@@ -24,39 +24,14 @@ ColourEntry *palette = NULL;
 #define WIDTH 1360
 #define HEIGHT 740
 
-#define DT 1.0         /* ms per sim step */
-
 /* Visualization layout */
 #define RASTER_H 350
 #define VTRACE_H 110
 #define PANEL_H 50
 #define SELECT_TRACE_H 100
 
-/* Delay queues: for each delay (1..MAX_DELAY) maintain list of targets arriving after that many ms */
-typedef struct
-{
-    int *neuron;   /* target neuron ids */
-    float *weight; /* corresponding weights */
-    int count;
-    int cap;
-} DelayBucket;
-
 /* Raster storage */
 #define FIRING_BUF 2000000 /* pair (time, neuron) capacity */
-
-/* STDP parameters (pair-based) */
-#define A_plus 0.1f
-#define A_minus 0.12f
-#define TAU_PLUS 20.0f
-#define TAU_MINUS 20.0f
-#define W_MIN 0.0f
-#define W_MAX 10.0f
-
-typedef struct
-{
-    int   neuron;
-    float time_ms;
-} FiringTime;
 
 /* Globals */
 int num_exc = 0.0; // number of exc neurons
@@ -121,22 +96,6 @@ static void bucket_push(DelayBucket *db, int neuron, float weight)
 static void bucket_clear(DelayBucket *db)
 {
     db->count = 0;
-}
-
-int* array_permute(int *arr, int N)
-{
-    if (arr == NULL || arrlen(arr) == 0) {
-        arrsetlen(arr, N);
-    }
-    for (int i = 0; i < N; ++i)
-        arr[i] = i;
-    for (int i = N-1; i > 0; --i) {
-        int j = rand() % (i+1);
-        int tmp = arr[i];
-        arr[i] = arr[j];
-        arr[j] = tmp;
-    }
-    return arr;
 }
 
 /* Initialize network (connections, weights, delays, v/u, buffers) */

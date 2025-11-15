@@ -9,5 +9,6 @@ float    frandf();
 float    clampf(float x, float a, float b);
 float    rand01();
 uint32_t f_randi(uint32_t index);
+int* array_permute(int *arr, int N);
 
 #endif /* MATH_UTILS_H_ */
