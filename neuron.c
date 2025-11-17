@@ -89,6 +89,8 @@ static float chirp_vs_burst_score(float c, float d)
     return score_ch - score_ib; /* >0 -> CH-like, <0 -> IB-like */
 }
 
+//#define DBG_DUMP_TABLE_CLASSIFICATION
+#ifdef DBG_DUMP_TABLE_CLASSIFICATION
 static void print_detailed_scores(IzkNeuron *neuron, int best_idx)
 {
     printf("\nDetailed scores vs pars_table:\n");
@@ -111,8 +113,7 @@ static void print_detailed_scores(IzkNeuron *neuron, int best_idx)
             printf("\n");
     }
 }
-
-#define CLASSIFICATION_DEBUG
+#endif
 
 ClassResult neuron_classify(IzkNeuron *neuron)
 {
@@ -131,12 +132,6 @@ ClassResult neuron_classify(IzkNeuron *neuron)
             best_idx = i;
         }
     }
-//    if (best_score >= SCORE_THRESHOLD && best_idx >= 0) {
-//        snprintf(res.type, sizeof(res.type), "%s", pars_table[best_idx].name);
-//        res.score = best_score;
-//        snprintf(res.reason, sizeof(res.reason), "Matched table row %d (score %.3f)", best_idx, best_score);
-//        goto done;
-//    }
 
     /* 2) template espliciti coerenti con la tabella del paper */
     if ( near_template(neuron, 0.02f, 0.25f, -65.0f, 2.0f) ) {
@@ -226,7 +221,7 @@ ClassResult neuron_classify(IzkNeuron *neuron)
 
 done:
 
-#ifdef CLASSIFICATION_DEBUG
+#ifdef DBG_DUMP_TABLE_CLASSIFICATION
     /* debug: stampa dettagliata dei confronti */
     print_detailed_scores(neuron, best_idx);
 #endif

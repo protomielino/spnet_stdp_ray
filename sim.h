@@ -15,9 +15,6 @@
 #define W_MIN 0.0f
 #define W_MAX 10.0f
 
-/* Raster storage */
-#define FIRING_BUF 2000000 /* pair (time, neuron) capacity */
-
 /* Delay queues: for each delay (1..MAX_DELAY) maintain list of targets arriving after that many ms */
 typedef struct
 {
@@ -26,6 +23,9 @@ typedef struct
     int    count;
     int    cap;
 } DelayBucket;
+
+/* Raster storage */
+#define FIRING_BUF 2000000 /* pair (time, neuron) capacity */
 
 typedef struct
 {

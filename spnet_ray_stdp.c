@@ -21,7 +21,7 @@
 ColourEntry *palette = NULL;
 
 /* Window */
-#define WIDTH 1360
+#define WIDTH 740
 #define HEIGHT 740
 
 /* Visualization layout */
@@ -299,9 +299,6 @@ int main(int argc, char **argv)
             sim_free_network(&s, &grid);
             sim_init_network(&s, &grid);
         }
-        if (paused)
-            if (IsKeyPressed(KEY_RIGHT))
-                sim_step(&s, &grid);
 
         if (IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
             if (graphics_raster) {
@@ -331,6 +328,9 @@ int main(int argc, char **argv)
         }
 
         /* simulate */
+        if (paused)
+            if (IsKeyPressed(KEY_RIGHT))
+                sim_step(&s, &grid);
         if (!paused)
             for (int spf = 0; spf < steps_per_frame; spf++)
                 sim_step(&s, &grid);
